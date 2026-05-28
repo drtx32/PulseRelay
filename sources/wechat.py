@@ -1,54 +1,126 @@
 """
-WeFlow 数据源 - 通过 HTTP SSE 流消费微信消息
+WeFlow source adapter.
+
+Consumes WeFlow HTTP SSE streams and publishes normalized EventEnvelope
+objects into the EventBus.
 """
+
+from __future__ import annotations
 
 import json
 import logging
-import os
 import time
-import requests
 from datetime import datetime
-from base import Module, Signals
+
+import requests
+
+from core.event import EventEnvelope, EventContent, EventContext, EventMeta, EventSender, EventSource
+from core.source_adapter import (
+    SourceAdapter,
+    SourceCapabilities,
+    SourceManifest,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class WeFlowSource(Module):
-    """微信数据源，通过 HTTP SSE 流消费消息"""
+class WeFlowSource(SourceAdapter):
+    """WeFlow SSE source adapter."""
+
+    manifest = SourceManifest(
+        id="weflow",
+        name="WeFlow Source",
+        description="Consume WeFlow SSE streams and normalize chat events.",
+        capabilities=SourceCapabilities(
+            supports_streaming=True,
+            supports_websocket=False,
+        ),
+        tags=["wechat", "sse", "stream"],
+    )
 
     def __init__(
         self,
-        signals: Signals = None,
-        host: str = "localhost",
-        port: int = 5031,
-        access_token: str = None,
-        enabled: bool = True
+        event_bus,
+        host: str,
+        port: int,
+        access_token: str,
+        enabled: bool = True,
     ):
-        super().__init__(signals, enabled)
+        super().__init__(event_bus=event_bus, enabled=enabled)
+
         self.host = host
         self.port = port
-        self.access_token = access_token or os.getenv(
-            "WEFLOW_TOKEN", "3bbdf1d0ed8ec3cd357894a9bdb99494")
+        self.access_token = access_token
+
         self.base_url = f"http://{self.host}:{self.port}/api/v1/push/messages"
+
+    def normalize_event(self, raw: dict) -> EventEnvelope | None:
+        """Normalize WeFlow payload into EventEnvelope."""
+
+        rawid = raw.get("rawid", "")
+        timestamp = raw.get("timestamp", 0)
+
+        if timestamp and time.time() - timestamp > 60 * 5:
+            logger.debug(
+                f"Ignored old message: {raw.get('content', '')[:30]}..."
+            )
+            return None
+
+        dt = datetime.fromtimestamp(timestamp) if timestamp else datetime.now()
+
+        dedupe_key = f"weflow:{timestamp}:{rawid}" if rawid else f"weflow:{timestamp}"
+
+        return EventEnvelope(
+            source=EventSource(
+                type="weflow",
+                id=raw.get("sessionId", ""),
+                name=raw.get("groupName", raw.get("sourceName", "")),
+            ),
+            sender=EventSender(
+                id=raw.get("sourceName", ""),
+                name=raw.get("sourceName", ""),
+                trust_level="user",
+            ),
+            event=EventMeta(
+                type="message.created",
+                timestamp=dt.isoformat(),
+                dedupe_key=dedupe_key,
+            ),
+            content=EventContent(
+                title=raw.get("groupName", raw.get("sourceName", "")),
+                text=raw.get("content", ""),
+                raw=raw,
+            ),
+            context=EventContext(
+                conversation_id=raw.get("sessionId", ""),
+                channel_id=raw.get("sessionId", ""),
+                extra={
+                    "group_name": raw.get("groupName", ""),
+                    "rawid": rawid,
+                },
+            ),
+        )
 
     async def run(self):
         logger.info(f"WeFlowSource starting: {self.base_url}")
 
-        while not self.signals.terminate:
+        while self.health.state != "stopped":
             try:
                 resp = requests.get(
                     self.base_url,
                     params={"access_token": self.access_token},
                     stream=True,
-                    timeout=30
+                    timeout=30,
                 )
                 resp.raise_for_status()
 
                 for line in resp.iter_lines():
                     if not line:
                         continue
+
                     if not line.startswith(b"data:"):
                         continue
+
                     if b"message.new" not in line:
                         continue
 
@@ -59,40 +131,24 @@ class WeFlowSource(Module):
                         logger.debug(f"Failed to parse line: {e}")
                         continue
 
-                    # 字段适配：raw → Message 格式
-                    # 去重用 timestamp + rawid（递增_timestamp + 随机_rawid）
-                    rawid = raw.get("rawid", "")
-                    timestamp = raw.get("timestamp", 0)
-                    _time = datetime.fromtimestamp(
-                        timestamp) if timestamp else datetime.now()
-
-                    # 超过5 min的消息忽略
-                    if time.time() - timestamp > 60 * 5:
-                        logger.debug(
-                            f"Ignored old message: {raw.get('content', '')[:30]}...")
+                    event = self.normalize_event(raw)
+                    if not event:
                         continue
 
-                    adapted = {
-                        "local_id": f"{timestamp}_{rawid}" if rawid else timestamp,
-                        "chat": raw.get("sessionId", ""),
-                        "chat_name": raw.get("groupName", raw.get("sourceName", "")),
-                        "sender": raw.get("sourceName", ""),
-                        "content": raw.get("content", ""),
-                        "time": _time.strftime("%m-%d %H:%M"),
-                        "raw": raw,
-                    }
+                    await self.emit(event)
 
-                    self.signals.put("wechat_message", adapted)
                     logger.info(
-                        f"SENT [{adapted['chat_name']}] {adapted['sender']}: {adapted['content'][:30]}...")
+                        f"EVENT [{event.source.name}] {event.sender.name}: {event.content.text[:30]}..."
+                    )
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"WeFlowSource connection error: {e}")
-                if not self.signals.terminate:
-                    time.sleep(5)  # 重试前等待
+                self.health.reconnect_count += 1
+                time.sleep(5)
+
             except Exception as e:
                 logger.error(f"WeFlowSource error: {e}")
-                if not self.signals.terminate:
-                    time.sleep(5)
+                self.health.reconnect_count += 1
+                time.sleep(5)
 
         logger.info("WeFlowSource stopped")
