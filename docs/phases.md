@@ -169,7 +169,7 @@ Future events no longer need to resemble chat messages.
 Status:
 
 ```text
-IN REVIEW
+COMPLETED
 ```
 
 Related PR:
@@ -231,7 +231,7 @@ all become possible through the same abstraction.
 Status:
 
 ```text
-IN REVIEW
+COMPLETED
 ```
 
 Related PR:
@@ -281,7 +281,7 @@ can now share one interface.
 Status:
 
 ```text
-IN REVIEW
+COMPLETED
 ```
 
 Related PR:
