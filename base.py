@@ -1,20 +1,43 @@
 """
-Base classes for data source modules.
-参考 Neuro 的 Signals + Module 架构。
+Legacy compatibility layer.
+
+Historically PulseRelay used a Signals + Module architecture inspired by Neuro.
+
+The project is now migrating toward:
+
+- EventEnvelope
+- EventBus
+- SourceAdapter
+- SourceRegistry
+
+This module remains as a compatibility bridge for older source modules.
 """
 
-import queue
 import asyncio
 from abc import ABC, abstractmethod
 
+from core.event_bus import EventBus
+from core.source_adapter import SourceAdapter, SourceRegistry
+
 
 class Signals:
-    """共享状态 + 统一 queue"""
+    """
+    Legacy compatibility wrapper.
+
+    Existing source modules can continue using:
+
+    ```python
+    signals.put(key, value)
+    ```
+
+    while internally the system transitions toward EventBus.
+    """
 
     def __init__(self):
         self._terminate = False
-        self.queue = queue.SimpleQueue()
-        self._sources = {}
+        self.event_bus = EventBus()
+        self.queue = self.event_bus.queue
+        self._sources = SourceRegistry()
 
     @property
     def terminate(self):
@@ -25,12 +48,12 @@ class Signals:
         self._terminate = value
 
     def put(self, key, value):
-        """放入队列，key 标识数据源类型"""
-        self.queue.put((key, value))
+        """Compatibility wrapper around EventBus.put()."""
+        self.event_bus.put(key, value)
 
     def register_source(self, name: str, source: "Module"):
-        """注册数据源"""
-        self._sources[name] = source
+        """Register a legacy source module."""
+        self._sources.register(source)
 
     @property
     def sources(self):
@@ -38,7 +61,11 @@ class Signals:
 
 
 class Module(ABC):
-    """数据源基类，每个数据源一个线程"""
+    """
+    Legacy source module abstraction.
+
+    New source implementations should inherit from SourceAdapter instead.
+    """
 
     def __init__(self, signals: Signals, enabled: bool = True):
         self.signals = signals
@@ -46,10 +73,18 @@ class Module(ABC):
         self.name = self.__class__.__name__
 
     def init_event_loop(self):
-        """启动异步事件循环"""
+        """Start async event loop."""
         asyncio.run(self.run())
 
     @abstractmethod
     async def run(self):
-        """子类实现具体的监听逻辑"""
+        """Subclasses implement realtime source logic."""
         pass
+
+
+__all__ = [
+    "Signals",
+    "Module",
+    "SourceAdapter",
+    "SourceRegistry",
+]
