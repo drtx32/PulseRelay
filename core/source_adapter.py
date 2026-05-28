@@ -122,27 +122,44 @@ class SourceAdapter(ABC):
 
 
 class SourceRegistry:
-    """Runtime registry for source adapters."""
+    """Runtime registry for source adapters and legacy modules."""
 
     def __init__(self):
-        self._sources: dict[str, SourceAdapter] = {}
+        self._sources: dict[str, Any] = {}
 
-    def register(self, source: SourceAdapter):
-        self._sources[source.source_id] = source
+    def _resolve_source_id(self, source: Any, fallback: str | None = None) -> str:
+        if hasattr(source, "source_id"):
+            return str(source.source_id)
 
-    def get(self, source_id: str) -> SourceAdapter | None:
+        manifest = getattr(source, "manifest", None)
+        if manifest is not None and hasattr(manifest, "id"):
+            return str(manifest.id)
+
+        if fallback:
+            return fallback
+
+        return str(getattr(source, "name", source.__class__.__name__))
+
+    def register(self, source: Any, source_id: str | None = None):
+        resolved_id = self._resolve_source_id(source, fallback=source_id)
+        self._sources[resolved_id] = source
+
+    def get(self, source_id: str) -> Any | None:
         return self._sources.get(source_id)
 
-    def list(self) -> list[SourceAdapter]:
+    def list(self) -> list[Any]:
         return list(self._sources.values())
 
     def health_snapshot(self) -> dict[str, dict[str, Any]]:
-        return {
-            source.source_id: {
-                "state": source.health.state,
-                "last_event_at": source.health.last_event_at,
-                "last_error": source.health.last_error,
-                "reconnect_count": source.health.reconnect_count,
+        snapshot: dict[str, dict[str, Any]] = {}
+
+        for source_id, source in self._sources.items():
+            health = getattr(source, "health", None)
+            snapshot[source_id] = {
+                "state": getattr(health, "state", "legacy") if health else "legacy",
+                "last_event_at": getattr(health, "last_event_at", "") if health else "",
+                "last_error": getattr(health, "last_error", "") if health else "",
+                "reconnect_count": getattr(health, "reconnect_count", 0) if health else 0,
             }
-            for source in self._sources.values()
-        }
+
+        return snapshot
