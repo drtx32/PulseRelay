@@ -1,11 +1,15 @@
 """
-Trigger Engine - 消息聚合 + 触发判断
-集成到 Signals，通过统一 queue 消费消息
+Trigger Engine - event aggregation and trigger decisions.
+
+This module remains compatible with the original message-centric flow while
+processing normalized EventEnvelope objects internally.
 """
 
 import time
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from core.event import EventEnvelope, ensure_event
 
 
 @dataclass
@@ -18,13 +22,15 @@ class TriggerConfig:
 
 @dataclass
 class Message:
+    """Compatibility view over a legacy message-shaped dictionary."""
+
     chat: str
     sender: str
     content: str
     time: str
     local_id: int
     chat_name: str = ""
-    raw: dict = field(default_factory=dict)
+    raw: dict = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Message":
@@ -38,18 +44,40 @@ class Message:
             raw=d,
         )
 
+    @classmethod
+    def from_event(cls, event: EventEnvelope) -> "Message":
+        raw = event.content.raw or event.to_dict()
+        return cls(
+            chat=event.context.conversation_id or event.source.id,
+            chat_name=event.source.name or event.content.title,
+            sender=event.sender.name or event.sender.id,
+            content=event.content.text,
+            time=event.event.timestamp,
+            local_id=raw.get("local_id", 0) if isinstance(raw, dict) else 0,
+            raw=raw if isinstance(raw, dict) else event.to_dict(),
+        )
+
 
 class TriggerResult:
-    def __init__(self, triggered: bool = False, reason: str = "", messages: list = None):
+    def __init__(
+        self,
+        triggered: bool = False,
+        reason: str = "",
+        events: list[EventEnvelope] = None,
+        messages: list[Message] = None,
+    ):
         self.triggered = triggered
         self.reason = reason
-        self.messages = messages or []
+        self.events = events or []
+        self.messages = messages or [Message.from_event(event) for event in self.events]
 
 
 class TriggerEngine:
     """
-    消息聚合 + 触发判断
-    从 Signals.queue 消费消息，不自己管理 queue
+    Event aggregation + trigger decisions.
+
+    The public API keeps process_raw() and messages compatibility so existing
+    gateway code can migrate incrementally.
     """
 
     def __init__(self, signals, config: TriggerConfig = None, monitor_chats: list[str] = None):
@@ -57,60 +85,67 @@ class TriggerEngine:
         self.config = config or TriggerConfig()
         self.monitor_chats = monitor_chats or []
 
-        self.messages: list[Message] = []
-        self.seen_keys: set[tuple] = set()
-        self.last_add_time: float = 0  # 0 表示还没有消息
+        self.events: list[EventEnvelope] = []
+        self.seen_keys: set[str] = set()
+        self.last_add_time: float = 0
         self.last_trigger_time: float = 0
 
-    def consume_signals(self, timeout: float = 0.5) -> Optional[dict]:
-        """从 Signals.queue 消费一条消息"""
+    @property
+    def messages(self) -> list[Message]:
+        """Compatibility projection for existing message formatting code."""
+        return [Message.from_event(event) for event in self.events]
+
+    def consume_signals(self, timeout: float = 0.5) -> Optional[tuple]:
+        """Consume one queued item from Signals.queue or EventBus.queue."""
         try:
-            key, raw = self.signals.queue.get(timeout=timeout)
+            item = self.signals.queue.get(timeout=timeout)
+            if hasattr(item, "event") and hasattr(item, "key"):
+                return item.key, item.event
+            key, raw = item
             return key, raw
-        except:
+        except Exception:
             return None
 
-    def process_raw(self, raw: dict):
-        """处理原始消息"""
-        msg = Message.from_dict(raw)
+    def process_raw(self, raw: dict, source_type: str = "message"):
+        """Compatibility wrapper for old source modules."""
+        return self.process_event(ensure_event(raw, source_type=source_type))
 
-        # 检查监控列表（支持 chat 或 chat_name）
+    def process_event(self, event: EventEnvelope):
+        """Process a normalized event."""
         if self.monitor_chats:
-            chat_name = raw.get("chat_name", "")
-            if msg.chat not in self.monitor_chats and chat_name not in self.monitor_chats:
+            chat = event.context.conversation_id or event.source.id
+            chat_name = event.source.name or event.context.extra.get("chat_name", "")
+            if chat not in self.monitor_chats and chat_name not in self.monitor_chats:
                 return False
 
-        # 去重
-        if msg.local_id != 0:
-            key = (msg.chat, msg.local_id)
-            if key in self.seen_keys:
-                print(f"  [去重] {key}")
-                return False
-            self.seen_keys.add(key)
+        dedupe_key = event.dedupe_key
+        if dedupe_key in self.seen_keys:
+            print(f"  [去重] {dedupe_key}")
+            return False
+        self.seen_keys.add(dedupe_key)
 
-        self.messages.append(msg)
+        self.events.append(event)
         self.last_add_time = time.monotonic()
         return True
 
     def check_trigger(self) -> TriggerResult:
-        """检查触发条件"""
+        """Check whether the current event batch should trigger downstream work."""
         now = time.monotonic()
 
-        # 检查最小触发间隔
         if now - self.last_trigger_time < self.config.min_trigger_interval:
             return TriggerResult(False)
 
-        if not self.messages:
+        if not self.events:
             return TriggerResult(False)
 
-        total_chars = sum(len(m.content) for m in self.messages)
+        total_chars = sum(len(event.content.text) for event in self.events)
         reasons = []
 
         if total_chars >= self.config.content_threshold:
             reasons.append(f"内容超限: {total_chars}/{self.config.content_threshold}字符")
 
-        if len(self.messages) >= self.config.message_threshold:
-            reasons.append(f"消息超限: {len(self.messages)}/{self.config.message_threshold}条")
+        if len(self.events) >= self.config.message_threshold:
+            reasons.append(f"消息超限: {len(self.events)}/{self.config.message_threshold}条")
 
         idle_time = now - self.last_add_time if self.last_add_time > 0 else 0
         if idle_time >= self.config.idle_timeout:
@@ -118,26 +153,27 @@ class TriggerEngine:
 
         if reasons:
             self.last_trigger_time = now
-            return TriggerResult(True, "; ".join(reasons), list(self.messages))
+            return TriggerResult(True, "; ".join(reasons), events=list(self.events))
 
         return TriggerResult(False)
 
     def reset(self):
-        """重置状态"""
-        self.messages = []
+        """Reset the current aggregation batch."""
+        self.events = []
         self.seen_keys.clear()
-        self.last_add_time = 0  # 0 表示等待消息中，不参与 idle 计算
+        self.last_add_time = 0
         self.last_trigger_time = time.monotonic()
 
     def get_stats(self) -> dict:
-        """获取当前统计"""
+        """Return current aggregation stats."""
         idle_seconds = 0
-        if self.messages and self.last_add_time > 0:
+        if self.events and self.last_add_time > 0:
             idle_seconds = time.monotonic() - self.last_add_time
         return {
-            "message_count": len(self.messages),
-            "total_chars": sum(len(m.content) for m in self.messages),
+            "event_count": len(self.events),
+            "message_count": len(self.events),
+            "total_chars": sum(len(event.content.text) for event in self.events),
             "idle_seconds": idle_seconds,
             "seen_keys": len(self.seen_keys),
-            "waiting_for_message": len(self.messages) == 0,
+            "waiting_for_message": len(self.events) == 0,
         }
