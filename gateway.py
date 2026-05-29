@@ -76,6 +76,7 @@ _trigger_config = TriggerConfig(
 _signals: Signals = None
 _trigger_engine: TriggerEngine = None
 _sources: dict = {}
+_source_threads: list[threading.Thread] = []
 _template: str = None
 
 
@@ -269,6 +270,7 @@ def startup():
                 target=lambda s=src: asyncio.run(s.start()),
                 daemon=True
             )
+            _source_threads.append(t)
             t.start()
             logger.info(f"Started source adapter: {name}")
 
@@ -285,6 +287,7 @@ def shutdown():
         _signals.terminate = True
 
     for name, src in _sources.items():
-        logger.info(f"Stopping source: {name}")
+        src.request_stop()
+        logger.info(f"Requested stop for source: {name}")
 
     logger.info("Shutdown complete")

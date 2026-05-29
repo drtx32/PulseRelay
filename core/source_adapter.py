@@ -115,6 +115,10 @@ class SourceAdapter(ABC):
     async def stop(self):
         self.health.state = "stopped"
 
+    def request_stop(self):
+        """Synchronous stop request for use from non-async contexts."""
+        self.health.state = "stopped"
+
     @abstractmethod
     async def run(self):
         """Main event loop for the source adapter."""
