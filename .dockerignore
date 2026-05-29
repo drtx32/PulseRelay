@@ -1,0 +1,49 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*.pyc
+.pytest_cache
+*.egg-info
+.eggs
+dist
+build
+
+# Virtual environments
+venv
+.venv
+env
+.env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Node (frontend build artifacts only - node_modules handled separately in multi-stage)
+node_modules
+
+# Logs
+*.log
+logs
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+docs
+
+# Tests
+tests
+coverage
+
+# CI/CD
+.github
+.gitlab-ci.yml
+docker-compose*.yml

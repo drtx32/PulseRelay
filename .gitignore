@@ -219,4 +219,4 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-drafts/
+drafts/dashboard/node_modules

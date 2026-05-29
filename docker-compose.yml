@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pulserelay-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # WebSocket Server Configuration
+      - WS_HOST=${WS_HOST:-127.0.0.1}
+      - WS_PORT=${WS_PORT:-18800}
+      - WS_PATH=${WS_PATH:-/ws}
+      # Client Configuration
+      - SENDER_ID=${SENDER_ID:-test_user_001}
+      - SENDER_NAME=${SENDER_NAME:-TestUser}
+      # Auth Token
+      - WS_TOKEN=${WS_TOKEN:-}
+      # Bark Push Configuration
+      - BARK_DEVICE_KEY=${BARK_DEVICE_KEY:-}
+      # WeFlow Monitor Configuration
+      - WEFLOW_HOST=${WEFLOW_HOST:-localhost}
+      - WEFLOW_PORT=${WEFLOW_PORT:-5031}
+      - WEFLOW_TOKEN=${WEFLOW_TOKEN:-}
+      # Monitor specific chats (comma-separated)
+      - WX_MONITOR_CHATS=${WX_MONITOR_CHATS:-}
+      # Trigger thresholds
+      - WX_CONTENT_THRESHOLD=${WX_CONTENT_THRESHOLD:-1000}
+      - WX_MESSAGE_THRESHOLD=${WX_MESSAGE_THRESHOLD:-10}
+      - WX_IDLE_TIMEOUT=${WX_IDLE_TIMEOUT:-20}
+      # Template file path
+      - WX_TEMPLATE=${WX_TEMPLATE:-templates/wx_template_example.j2}
+      # GitHub webhook secret
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+    volumes:
+      # Persist configuration
+      - ./data:/app/data
+      # Persist plugins
+      - ./plugins:/app/plugins
+      # Persist templates
+      - ./templates:/app/templates
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - pulserelay
+
+networks:
+  pulserelay:
+    driver: bridge
