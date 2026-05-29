@@ -115,6 +115,8 @@ class WeFlowSource(SourceAdapter):
                 resp.raise_for_status()
 
                 for line in resp.iter_lines():
+                    if self.health.state == "stopped":
+                        break
                     if not line:
                         continue
 
