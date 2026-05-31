@@ -14,10 +14,11 @@ import logging
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import websockets
 import jinja2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ from dotenv import load_dotenv
 from base import Signals
 from core.config import ConfigLoader
 from core.trigger_engine import TriggerEngine, TriggerConfig, Message
-from sources import WeFlowSource
+from sources import GitHubWebhookSource, SlackSource, TelegramSource, WeFlowSource
 from handlers.bark import bark_notify, init_bark_handler
 
 # Load .env file for deployment/runtime overrides only
@@ -75,9 +76,10 @@ _trigger_config = TriggerConfig(
 # 全局状态
 _signals: Signals = None
 _trigger_engine: TriggerEngine = None
-_sources: dict = {}
-_source_threads: list[threading.Thread] = []
+_sources: dict[str, Any] = {}
+_source_threads: dict[str, threading.Thread] = {}
 _template: str = None
+_github_webhook_path: str = "/webhooks/github"
 
 
 def format_messages(messages: list[Message], template: str = None) -> str:
@@ -205,27 +207,171 @@ def _handle_trigger(result):
     _trigger_engine.reset()
 
 
-@app.on_event("startup")
-def startup():
-    """启动时初始化 Signals、TriggerEngine、SourceAdapter"""
-    global _signals, _trigger_engine, _sources, _template
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if value is None:
+        return default
+    return bool(value)
 
-    weflow_config = _runtime_config.get("sources", {}).get("weflow", {})
 
+def _load_template_from_config(runtime_config: dict[str, Any]) -> str | None:
+    weflow_config = runtime_config.get("sources", {}).get("weflow", {})
     template_path_str = (
         weflow_config.get("template", {}).get("path")
         or "templates/wx_template_example.j2"
     )
-
     template_path = Path(__file__).parent / template_path_str
-
-    if template_path.exists():
-        with open(template_path, 'r', encoding='utf-8') as f:
-            _template = f.read()
-        logger.info(f"Loaded template from {template_path}")
-    else:
-        _template = None
+    if not template_path.exists():
         logger.info("No template file found, using default format")
+        return None
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        template = f.read()
+    logger.info(f"Loaded template from {template_path}")
+    return template
+
+
+def _build_sources(signals: Signals, runtime_config: dict[str, Any]) -> dict[str, Any]:
+    sources: dict[str, Any] = {}
+    source_cfg = runtime_config.get("sources", {})
+
+    weflow_config = source_cfg.get("weflow", {})
+    weflow_connection = weflow_config.get("connection", {})
+    sources["weflow"] = WeFlowSource(
+        event_bus=signals.event_bus,
+        host=weflow_connection.get("host", "localhost"),
+        port=weflow_connection.get("port", 5031),
+        access_token=weflow_connection.get("access_token", ""),
+        enabled=_as_bool(weflow_config.get("enabled", True), default=True),
+    )
+
+    telegram_config = source_cfg.get("telegram", {})
+    telegram_enabled = _as_bool(telegram_config.get("enabled", False), default=False)
+    if telegram_enabled:
+        if TelegramSource is None:
+            logger.warning("Telegram source enabled but python-telegram-bot is not installed")
+        else:
+            telegram_connection = telegram_config.get("connection", {})
+            bot_token = telegram_connection.get("bot_token", "")
+            if not bot_token:
+                logger.warning("Telegram source enabled but bot_token is missing")
+            else:
+                telegram_monitor = telegram_config.get("monitor", {})
+                sources["telegram"] = TelegramSource(
+                    event_bus=signals.event_bus,
+                    bot_token=bot_token,
+                    allowed_chat_ids=telegram_monitor.get("allowed_chat_ids", []),
+                    enabled=True,
+                )
+
+    slack_config = source_cfg.get("slack", {})
+    slack_enabled = _as_bool(slack_config.get("enabled", False), default=False)
+    if slack_enabled:
+        if SlackSource is None:
+            logger.warning("Slack source enabled but slack-sdk is not installed")
+        else:
+            slack_connection = slack_config.get("connection", {})
+            app_token = slack_connection.get("app_token", "")
+            bot_token = slack_connection.get("bot_token", "")
+            if not app_token or not bot_token:
+                logger.warning("Slack source enabled but app_token/bot_token is missing")
+            else:
+                slack_monitor = slack_config.get("monitor", {})
+                sources["slack"] = SlackSource(
+                    event_bus=signals.event_bus,
+                    app_token=app_token,
+                    bot_token=bot_token,
+                    allowed_channels=slack_monitor.get("allowed_channels", []),
+                    enabled=True,
+                )
+
+    github_config = source_cfg.get("github_webhook", {})
+    github_enabled = _as_bool(github_config.get("enabled", False), default=False)
+    if github_enabled:
+        webhook_cfg = github_config.get("webhook", {})
+        sources["github_webhook"] = GitHubWebhookSource(
+            event_bus=signals.event_bus,
+            webhook_secret=webhook_cfg.get("secret", ""),
+            enabled=True,
+        )
+
+    return sources
+
+
+def _start_sources(sources: dict[str, Any]) -> dict[str, threading.Thread]:
+    threads: dict[str, threading.Thread] = {}
+    for name, src in sources.items():
+        if not getattr(src, "enabled", False):
+            continue
+        t = threading.Thread(
+            target=lambda s=src: asyncio.run(s.start()),
+            daemon=True,
+        )
+        t.start()
+        threads[name] = t
+        logger.info(f"Started source adapter: {name}")
+    return threads
+
+
+def _get_github_webhook_path(runtime_config: dict[str, Any]) -> str:
+    source_cfg = runtime_config.get("sources", {})
+    github_cfg = source_cfg.get("github_webhook", {})
+    webhook_cfg = github_cfg.get("webhook", {})
+    path = webhook_cfg.get("path", "/webhooks/github")
+    if not isinstance(path, str) or not path.startswith("/"):
+        return "/webhooks/github"
+    return path
+
+
+async def _handle_github_webhook_request(request: Request):
+    source = _sources.get("github_webhook")
+    if source is None or not isinstance(source, GitHubWebhookSource):
+        raise HTTPException(status_code=404, detail="GitHub webhook source not enabled")
+
+    raw_body = await request.body()
+    if not raw_body:
+        raise HTTPException(status_code=400, detail="Empty request body")
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc.msg}") from exc
+
+    event = await source.on_webhook(
+        payload=payload,
+        headers=dict(request.headers),
+        raw_body=raw_body,
+    )
+    if event is None:
+        return {"ok": True, "processed": False}
+
+    return {
+        "ok": True,
+        "processed": True,
+        "event_type": event.event.type,
+        "dedupe_key": event.event.dedupe_key,
+    }
+
+
+@app.post("/webhooks/github")
+async def github_webhook_default(request: Request):
+    return await _handle_github_webhook_request(request)
+
+
+@app.on_event("startup")
+def startup():
+    """启动时初始化 Signals、TriggerEngine、SourceAdapter"""
+    global _signals, _trigger_engine, _sources, _source_threads, _template, _github_webhook_path
+
+    _template = _load_template_from_config(_runtime_config)
 
     _signals = Signals()
 
@@ -235,6 +381,7 @@ def startup():
     init_bark_handler(bark_device_key)
     logger.info(f"Bark enabled: {bool(bark_device_key)}")
 
+    weflow_config = _runtime_config.get("sources", {}).get("weflow", {})
     monitor_chats = (
         weflow_config.get("monitor", {}).get("chats", [])
     )
@@ -252,27 +399,23 @@ def startup():
         monitor_chats=monitor_chats
     )
 
-    connection = weflow_config.get("connection", {})
+    _sources = _build_sources(_signals, _runtime_config)
+    for source_name, source in _sources.items():
+        _signals.register_source(source_name, source)
 
-    _sources['weflow'] = WeFlowSource(
-        event_bus=_signals.event_bus,
-        host=connection.get("host", "localhost"),
-        port=connection.get("port", 5031),
-        access_token=connection.get("access_token", ""),
-        enabled=weflow_config.get("enabled", True)
-    )
+    _source_threads = _start_sources(_sources)
 
-    _signals.register_source('weflow', _sources['weflow'])
-
-    for name, src in _sources.items():
-        if src.enabled:
-            t = threading.Thread(
-                target=lambda s=src: asyncio.run(s.start()),
-                daemon=True
+    _github_webhook_path = _get_github_webhook_path(_runtime_config)
+    if _github_webhook_path != "/webhooks/github":
+        known_paths = {getattr(route, "path", "") for route in app.router.routes}
+        if _github_webhook_path not in known_paths:
+            app.add_api_route(
+                _github_webhook_path,
+                _handle_github_webhook_request,
+                methods=["POST"],
+                name="github_webhook_configured",
             )
-            _source_threads.append(t)
-            t.start()
-            logger.info(f"Started source adapter: {name}")
+            logger.info(f"Registered GitHub webhook path: {_github_webhook_path}")
 
     _main_thread = threading.Thread(target=_main_loop, daemon=True)
     _main_thread.start()
@@ -280,14 +423,17 @@ def startup():
 
 
 @app.on_event("shutdown")
-def shutdown():
+async def shutdown():
     global _signals, _sources
 
     if _signals:
         _signals.terminate = True
 
     for name, src in _sources.items():
-        src.request_stop()
-        logger.info(f"Requested stop for source: {name}")
+        try:
+            await src.stop()
+        except Exception as exc:
+            logger.warning(f"Failed to stop source {name}: {exc}")
+        logger.info(f"Stopping source: {name}")
 
     logger.info("Shutdown complete")

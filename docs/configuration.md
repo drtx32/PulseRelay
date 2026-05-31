@@ -57,6 +57,27 @@ sources:
       content_threshold: 1000
       message_threshold: 10
       idle_timeout: 20
+
+  telegram:
+    enabled: false
+    connection:
+      bot_token: "<telegram_bot_token>"
+    monitor:
+      allowed_chat_ids: []
+
+  slack:
+    enabled: false
+    connection:
+      app_token: "<xapp-token>"
+      bot_token: "<xoxb-token>"
+    monitor:
+      allowed_channels: []
+
+  github_webhook:
+    enabled: false
+    webhook:
+      path: /webhooks/github
+      secret: "<github_webhook_secret>"
 ```
 
 ## Why YAML
