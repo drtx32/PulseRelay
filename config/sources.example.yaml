@@ -48,3 +48,7 @@ sources:
     webhook:
       path: /webhooks/github
       secret: "<github_webhook_secret>"
+
+phase9:
+  enabled: true
+  db_path: data/pulserelay_phase9.db

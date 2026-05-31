@@ -78,7 +78,20 @@ sources:
     webhook:
       path: /webhooks/github
       secret: "<github_webhook_secret>"
+
+phase9:
+  enabled: true
+  db_path: data/pulserelay_phase9.db
 ```
+
+## Phase 9 API Endpoints
+
+When `phase9.enabled` is true, gateway exposes:
+
+- `GET /api/phase9/events`
+- `GET /api/phase9/dead-letters`
+- `GET /api/phase9/audit-logs`
+- `POST /api/phase9/replay`
 
 ## Why YAML
 

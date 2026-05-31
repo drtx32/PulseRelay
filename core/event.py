@@ -123,6 +123,29 @@ class EventEnvelope:
         }
 
     @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EventEnvelope":
+        """Rehydrate an EventEnvelope from a serialized dictionary."""
+
+        source_data = data.get("source", {}) if isinstance(data, dict) else {}
+        sender_data = data.get("sender", {}) if isinstance(data, dict) else {}
+        event_data = data.get("event", {}) if isinstance(data, dict) else {}
+        content_data = data.get("content", {}) if isinstance(data, dict) else {}
+        context_data = data.get("context", {}) if isinstance(data, dict) else {}
+        permissions_data = data.get("permissions", {}) if isinstance(data, dict) else {}
+        routing_data = data.get("routing", {}) if isinstance(data, dict) else {}
+
+        return cls(
+            id=data.get("id", f"evt_{uuid4().hex}"),
+            source=EventSource(**source_data),
+            sender=EventSender(**sender_data),
+            event=EventMeta(**event_data),
+            content=EventContent(**content_data),
+            context=EventContext(**context_data),
+            permissions=EventPermissions(**permissions_data),
+            routing=EventRouting(**routing_data),
+        )
+
+    @classmethod
     def from_message_dict(cls, raw: dict[str, Any], source_type: str = "message") -> "EventEnvelope":
         """Create an event from the current message-shaped dictionaries.
 
@@ -158,4 +181,11 @@ def ensure_event(value: EventEnvelope | dict[str, Any], source_type: str = "mess
 
     if isinstance(value, EventEnvelope):
         return value
+    if (
+        isinstance(value, dict)
+        and "source" in value
+        and "event" in value
+        and "content" in value
+    ):
+        return EventEnvelope.from_dict(value)
     return EventEnvelope.from_message_dict(value, source_type=source_type)

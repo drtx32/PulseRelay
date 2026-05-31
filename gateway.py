@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 
 from base import Signals
 from core.config import ConfigLoader
+from core.persistence import SQLitePhase9Store
 from core.trigger_engine import TriggerEngine, TriggerConfig, Message
 from sources import GitHubWebhookSource, SlackSource, TelegramSource, WeFlowSource
 from handlers.bark import bark_notify, init_bark_handler
@@ -80,6 +81,15 @@ _sources: dict[str, Any] = {}
 _source_threads: dict[str, threading.Thread] = {}
 _template: str = None
 _github_webhook_path: str = "/webhooks/github"
+_phase9_store: SQLitePhase9Store | None = None
+_phase9_enabled: bool = False
+
+
+class ReplayRequest(BaseModel):
+    limit: int = 100
+    source_type: str | None = None
+    event_type: str | None = None
+    status: str | None = "received"
 
 
 def format_messages(messages: list[Message], template: str = None) -> str:
@@ -166,6 +176,13 @@ async def _forward_to_openclaw_async(content: str, senderId: str, senderName: st
 
     except Exception as e:
         logger.error(f"Failed to forward to OpenClaw: {e}")
+        _audit(
+            action="delivery.openclaw.forward",
+            status="failed",
+            entity_type="delivery",
+            entity_id="openclaw",
+            message=str(e),
+        )
 
 
 def _main_loop():
@@ -176,10 +193,29 @@ def _main_loop():
             try:
                 item = _trigger_engine.consume_signals(timeout=0.1)
                 if item:
-                    _, event = item
+                    source_key, event = item
                     _trigger_engine.process_event(event)
-            except Exception:
-                pass
+                    _audit(
+                        action="event.processed",
+                        status="ok",
+                        entity_type="event",
+                        entity_id=getattr(event, "id", ""),
+                        metadata={"source_key": source_key},
+                    )
+            except Exception as exc:
+                if _phase9_store is not None and item:
+                    _, event = item
+                    _phase9_store.record_dead_letter(
+                        event=event,
+                        stage="trigger_engine.process_event",
+                        error=str(exc),
+                    )
+                _audit(
+                    action="event.processed",
+                    status="failed",
+                    entity_type="event",
+                    message=f"Failed processing event: {exc}",
+                )
 
             result = _trigger_engine.check_trigger()
             if result.triggered:
@@ -201,8 +237,33 @@ def _handle_trigger(result):
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_handle_trigger_async(content))
         loop.close()
+        _audit(
+            action="trigger.fired",
+            status="ok",
+            entity_type="trigger",
+            entity_id="batch",
+            message=result.reason,
+            metadata={
+                "event_count": len(result.events),
+                "message_count": len(result.messages),
+            },
+        )
     except Exception as e:
         logger.error(f"Failed to schedule trigger: {e}")
+        _audit(
+            action="trigger.fired",
+            status="failed",
+            entity_type="trigger",
+            entity_id="batch",
+            message=str(e),
+        )
+        if _phase9_store is not None:
+            for event in result.events:
+                _phase9_store.record_dead_letter(
+                    event=event,
+                    stage="trigger.handle",
+                    error=str(e),
+                )
 
     _trigger_engine.reset()
 
@@ -331,6 +392,48 @@ def _get_github_webhook_path(runtime_config: dict[str, Any]) -> str:
     return path
 
 
+def _setup_phase9_store(signals: Signals, runtime_config: dict[str, Any]) -> None:
+    global _phase9_store, _phase9_enabled
+    phase9_cfg = runtime_config.get("phase9", {})
+    _phase9_enabled = _as_bool(phase9_cfg.get("enabled", False), default=False)
+    if not _phase9_enabled:
+        _phase9_store = None
+        signals.event_bus.attach_store(None)
+        return
+
+    db_path = phase9_cfg.get("db_path", "data/pulserelay_phase9.db")
+    _phase9_store = SQLitePhase9Store(db_path=db_path)
+    signals.event_bus.attach_store(_phase9_store)
+    _phase9_store.record_audit(
+        action="phase9.startup",
+        entity_type="gateway",
+        entity_id="startup",
+        status="ok",
+        message="Phase9 persistence initialized",
+        metadata={"db_path": str(db_path)},
+    )
+
+
+def _audit(
+    action: str,
+    status: str = "ok",
+    entity_type: str = "",
+    entity_id: str = "",
+    message: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    if _phase9_store is None:
+        return
+    _phase9_store.record_audit(
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        status=status,
+        message=message,
+        metadata=metadata,
+    )
+
+
 async def _handle_github_webhook_request(request: Request):
     source = _sources.get("github_webhook")
     if source is None or not isinstance(source, GitHubWebhookSource):
@@ -351,7 +454,23 @@ async def _handle_github_webhook_request(request: Request):
         raw_body=raw_body,
     )
     if event is None:
+        _audit(
+            action="source.github_webhook.ignored",
+            status="ok",
+            entity_type="source",
+            entity_id="github_webhook",
+            message="GitHub webhook event ignored",
+        )
         return {"ok": True, "processed": False}
+
+    _audit(
+        action="source.github_webhook.processed",
+        status="ok",
+        entity_type="source",
+        entity_id="github_webhook",
+        message=f"Processed webhook event {event.event.type}",
+        metadata={"event_id": event.id, "event_type": event.event.type},
+    )
 
     return {
         "ok": True,
@@ -366,6 +485,110 @@ async def github_webhook_default(request: Request):
     return await _handle_github_webhook_request(request)
 
 
+@app.get("/api/phase9/events")
+async def phase9_events(limit: int = 100, source_type: str | None = None, event_type: str | None = None, status: str | None = None):
+    if _phase9_store is None:
+        return {"enabled": False, "events": []}
+    events = _phase9_store.list_events(
+        limit=limit,
+        source_type=source_type,
+        event_type=event_type,
+        status=status,
+    )
+    return {
+        "enabled": True,
+        "events": [
+            {
+                "id": item.id,
+                "event_id": item.event_id,
+                "bus_key": item.bus_key,
+                "source_type": item.source_type,
+                "event_type": item.event_type,
+                "dedupe_key": item.dedupe_key,
+                "status": item.status,
+                "error": item.error,
+                "created_at": item.created_at,
+            }
+            for item in events
+        ],
+    }
+
+
+@app.get("/api/phase9/dead-letters")
+async def phase9_dead_letters(limit: int = 100):
+    if _phase9_store is None:
+        return {"enabled": False, "dead_letters": []}
+    dead_letters = _phase9_store.list_dead_letters(limit=limit)
+    return {
+        "enabled": True,
+        "dead_letters": [
+            {
+                "id": item.id,
+                "event_id": item.event_id,
+                "source_type": item.source_type,
+                "event_type": item.event_type,
+                "stage": item.stage,
+                "error": item.error,
+                "created_at": item.created_at,
+            }
+            for item in dead_letters
+        ],
+    }
+
+
+@app.get("/api/phase9/audit-logs")
+async def phase9_audit_logs(limit: int = 100, action: str | None = None, status: str | None = None):
+    if _phase9_store is None:
+        return {"enabled": False, "audit_logs": []}
+    logs = _phase9_store.list_audit_logs(limit=limit, action=action, status=status)
+    return {
+        "enabled": True,
+        "audit_logs": [
+            {
+                "id": item.id,
+                "action": item.action,
+                "entity_type": item.entity_type,
+                "entity_id": item.entity_id,
+                "status": item.status,
+                "message": item.message,
+                "metadata": item.metadata,
+                "created_at": item.created_at,
+            }
+            for item in logs
+        ],
+    }
+
+
+@app.post("/api/phase9/replay")
+async def phase9_replay(request: ReplayRequest):
+    if _signals is None:
+        raise HTTPException(status_code=503, detail="Gateway not started")
+    if _phase9_store is None:
+        return {"enabled": False, "replayed": 0}
+
+    replayed = _signals.event_bus.replay(
+        limit=request.limit,
+        source_type=request.source_type,
+        event_type=request.event_type,
+        status=request.status,
+    )
+    _audit(
+        action="phase9.replay",
+        status="ok",
+        entity_type="event_bus",
+        entity_id="replay",
+        message=f"Replayed {replayed} events",
+        metadata={
+            "limit": request.limit,
+            "source_type": request.source_type,
+            "event_type": request.event_type,
+            "status": request.status,
+            "replayed": replayed,
+        },
+    )
+    return {"enabled": True, "replayed": replayed}
+
+
 @app.on_event("startup")
 def startup():
     """启动时初始化 Signals、TriggerEngine、SourceAdapter"""
@@ -374,6 +597,7 @@ def startup():
     _template = _load_template_from_config(_runtime_config)
 
     _signals = Signals()
+    _setup_phase9_store(_signals, _runtime_config)
 
     bark_config = _runtime_config.get("deliveries", {}).get("bark", {})
     bark_device_key = bark_config.get("device_key", "")
@@ -404,6 +628,14 @@ def startup():
         _signals.register_source(source_name, source)
 
     _source_threads = _start_sources(_sources)
+    _audit(
+        action="source.startup",
+        status="ok",
+        entity_type="source",
+        entity_id="all",
+        message="Sources initialized",
+        metadata={"sources": list(_sources.keys())},
+    )
 
     _github_webhook_path = _get_github_webhook_path(_runtime_config)
     if _github_webhook_path != "/webhooks/github":
@@ -420,11 +652,18 @@ def startup():
     _main_thread = threading.Thread(target=_main_loop, daemon=True)
     _main_thread.start()
     logger.info("Main loop started")
+    _audit(
+        action="gateway.startup",
+        status="ok",
+        entity_type="gateway",
+        entity_id="startup",
+        message="Gateway startup complete",
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _signals, _sources
+    global _signals, _sources, _phase9_store
 
     if _signals:
         _signals.terminate = True
@@ -435,5 +674,17 @@ async def shutdown():
         except Exception as exc:
             logger.warning(f"Failed to stop source {name}: {exc}")
         logger.info(f"Stopping source: {name}")
+
+    _audit(
+        action="gateway.shutdown",
+        status="ok",
+        entity_type="gateway",
+        entity_id="shutdown",
+        message="Gateway shutdown complete",
+    )
+
+    if _phase9_store is not None:
+        _phase9_store.close()
+        _phase9_store = None
 
     logger.info("Shutdown complete")
