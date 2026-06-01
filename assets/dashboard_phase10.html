@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PulseRelay Control Plane</title>
+  <style>
+    :root {
+      --bg: #f4efe6;
+      --card: #fffaf2;
+      --ink: #222222;
+      --muted: #6d655a;
+      --accent: #0f766e;
+      --accent-soft: #d2f2ef;
+      --warn: #b45309;
+      --danger: #b42318;
+      --ok: #166534;
+      --line: #dbcdb8;
+      --shadow: 0 10px 30px rgba(34, 34, 34, 0.09);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 500px at 10% -20%, #f9d9a9 0%, rgba(249, 217, 169, 0) 65%),
+        radial-gradient(900px 500px at 90% 0%, #b6e9e2 0%, rgba(182, 233, 226, 0) 65%),
+        var(--bg);
+      min-height: 100vh;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 18px 48px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      padding: 18px 20px;
+      margin-bottom: 16px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: 0.4px;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 14px 0 0;
+    }
+
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #ffffff;
+      padding: 10px 12px;
+      animation: rise .4s ease both;
+    }
+
+    .kpi b {
+      display: block;
+      font-size: 26px;
+      line-height: 1.1;
+      margin-top: 6px;
+    }
+
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      padding: 14px;
+      animation: rise .45s ease both;
+    }
+
+    .panel h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .item {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+
+    .pill {
+      display: inline-block;
+      font-size: 12px;
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin-left: 8px;
+      border: 1px solid transparent;
+    }
+
+    .run { background: #dcfce7; color: var(--ok); border-color: #86efac; }
+    .stop { background: #f3f4f6; color: #374151; border-color: #d1d5db; }
+    .err { background: #fee2e2; color: var(--danger); border-color: #fca5a5; }
+    .muted { color: var(--muted); }
+
+    .footer {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 840px) {
+      .panels { grid-template-columns: 1fr; }
+      .title { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1 class="title">PulseRelay Control Plane</h1>
+      <p class="subtitle">Phase 10 minimal dashboard for sources, replay, audit, and dead letters.</p>
+      <div class="grid" id="kpi-grid"></div>
+      <div class="footer" id="refresh-at">Refreshing...</div>
+    </section>
+
+    <section class="panels">
+      <article class="panel">
+        <h3>Source Runtime</h3>
+        <div class="list" id="source-list"></div>
+      </article>
+      <article class="panel">
+        <h3>Recent Audit</h3>
+        <div class="list" id="audit-list"></div>
+      </article>
+      <article class="panel">
+        <h3>Dead Letter Queue</h3>
+        <div class="list" id="dlq-list"></div>
+      </article>
+      <article class="panel">
+        <h3>Replay Quick Action</h3>
+        <p class="muted">Replay last 20 received events into current queue.</p>
+        <button id="replay-btn" style="border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent); padding:8px 12px; border-radius:10px; cursor:pointer;">Replay 20</button>
+        <p class="footer" id="replay-result"></p>
+      </article>
+    </section>
+  </div>
+
+  <script>
+    async function getJson(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(url + " -> " + res.status);
+      return res.json();
+    }
+
+    function statusPill(state) {
+      if (state === "running") return '<span class="pill run">running</span>';
+      if (state === "error") return '<span class="pill err">error</span>';
+      return '<span class="pill stop">' + (state || "unknown") + "</span>";
+    }
+
+    function renderList(targetId, rows, emptyText) {
+      const el = document.getElementById(targetId);
+      if (!rows.length) {
+        el.innerHTML = '<div class="item muted">' + emptyText + '</div>';
+        return;
+      }
+      el.innerHTML = rows.join("");
+    }
+
+    async function refresh() {
+      const [overview, sources, audits, dlq] = await Promise.all([
+        getJson("/api/phase10/overview"),
+        getJson("/api/sources"),
+        getJson("/api/phase9/audit-logs?limit=8"),
+        getJson("/api/phase9/dead-letters?limit=8")
+      ]);
+
+      document.getElementById("kpi-grid").innerHTML = `
+        <div class="kpi"><span class="muted">Sources Registered</span><b>${overview.sources_registered}</b></div>
+        <div class="kpi"><span class="muted">Sources Running</span><b>${overview.sources_running}</b></div>
+        <div class="kpi"><span class="muted">Events Total</span><b>${overview.phase9.events_total}</b></div>
+        <div class="kpi"><span class="muted">Events Failed</span><b>${overview.phase9.events_failed}</b></div>
+        <div class="kpi"><span class="muted">Dead Letters</span><b>${overview.phase9.dead_letters_total}</b></div>
+        <div class="kpi"><span class="muted">Audit Logs</span><b>${overview.phase9.audit_logs_total}</b></div>
+      `;
+
+      const sourceRows = Object.entries(sources.sources || {}).map(([name, info]) => `
+        <div class="item"><b>${name}</b>${statusPill(info.state)}<br><span class="muted">last_event_at: ${info.last_event_at || "-"}</span></div>
+      `);
+      renderList("source-list", sourceRows, "No source runtime info yet.");
+
+      const auditRows = (audits.audit_logs || []).map(log => `
+        <div class="item"><b>${log.action}</b>${statusPill(log.status === "failed" ? "error" : "running")}<br><span class="muted">${log.message || ""}</span></div>
+      `);
+      renderList("audit-list", auditRows, "No audit logs.");
+
+      const dlqRows = (dlq.dead_letters || []).map(item => `
+        <div class="item"><b>${item.event_type}</b><span class="pill err">${item.stage}</span><br><span class="muted">${item.error}</span></div>
+      `);
+      renderList("dlq-list", dlqRows, "No dead letters.");
+
+      document.getElementById("refresh-at").textContent = "Last refresh: " + new Date().toLocaleString();
+    }
+
+    document.getElementById("replay-btn").addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/phase9/replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ limit: 20 })
+        });
+        const data = await res.json();
+        document.getElementById("replay-result").textContent = "Replay completed: " + (data.replayed || 0) + " events.";
+        await refresh();
+      } catch (err) {
+        document.getElementById("replay-result").textContent = "Replay failed: " + err.message;
+      }
+    });
+
+    refresh().catch(err => {
+      document.getElementById("refresh-at").textContent = "Load failed: " + err.message;
+    });
+    setInterval(() => refresh().catch(() => {}), 8000);
+  </script>
+</body>
+</html>

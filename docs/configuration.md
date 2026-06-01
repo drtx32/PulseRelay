@@ -57,7 +57,41 @@ sources:
       content_threshold: 1000
       message_threshold: 10
       idle_timeout: 20
+
+  telegram:
+    enabled: false
+    connection:
+      bot_token: "<telegram_bot_token>"
+    monitor:
+      allowed_chat_ids: []
+
+  slack:
+    enabled: false
+    connection:
+      app_token: "<xapp-token>"
+      bot_token: "<xoxb-token>"
+    monitor:
+      allowed_channels: []
+
+  github_webhook:
+    enabled: false
+    webhook:
+      path: /webhooks/github
+      secret: "<github_webhook_secret>"
+
+phase9:
+  enabled: true
+  db_path: data/pulserelay_phase9.db
 ```
+
+## Phase 9 API Endpoints
+
+When `phase9.enabled` is true, gateway exposes:
+
+- `GET /api/phase9/events`
+- `GET /api/phase9/dead-letters`
+- `GET /api/phase9/audit-logs`
+- `POST /api/phase9/replay`
 
 ## Why YAML
 
