@@ -83,6 +83,7 @@ _template: str = None
 _github_webhook_path: str = "/webhooks/github"
 _phase9_store: SQLitePhase9Store | None = None
 _phase9_enabled: bool = False
+_dashboard_html_path = Path(__file__).parent / "assets" / "dashboard_phase10.html"
 
 
 class ReplayRequest(BaseModel):
@@ -434,6 +435,15 @@ def _audit(
     )
 
 
+def _source_health_snapshot() -> dict[str, Any]:
+    if _signals is None or not hasattr(_signals, "sources"):
+        return {}
+    try:
+        return _signals.sources.health_snapshot()
+    except Exception:
+        return {}
+
+
 async def _handle_github_webhook_request(request: Request):
     source = _sources.get("github_webhook")
     if source is None or not isinstance(source, GitHubWebhookSource):
@@ -483,6 +493,50 @@ async def _handle_github_webhook_request(request: Request):
 @app.post("/webhooks/github")
 async def github_webhook_default(request: Request):
     return await _handle_github_webhook_request(request)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def phase10_dashboard():
+    if not _dashboard_html_path.exists():
+        return HTMLResponse(
+            "<html><body><h1>Dashboard not found</h1></body></html>",
+            status_code=404,
+        )
+    return HTMLResponse(_dashboard_html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/sources")
+async def sources_snapshot():
+    return {
+        "sources": _source_health_snapshot(),
+        "registered": list(_sources.keys()),
+    }
+
+
+@app.get("/api/phase10/overview")
+async def phase10_overview():
+    phase9_stats = (
+        _phase9_store.stats()
+        if _phase9_store is not None
+        else {
+            "events_total": 0,
+            "events_failed": 0,
+            "dead_letters_total": 0,
+            "audit_logs_total": 0,
+        }
+    )
+    return {
+        "phase9_enabled": _phase9_store is not None,
+        "sources_registered": len(_sources),
+        "sources_running": len(
+            [
+                item
+                for item in _source_health_snapshot().values()
+                if item.get("state") == "running"
+            ]
+        ),
+        "phase9": phase9_stats,
+    }
 
 
 @app.get("/api/phase9/events")

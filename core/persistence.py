@@ -341,6 +341,28 @@ class SQLitePhase9Store:
         # Replay old->new ordering.
         return [ensure_event(item.payload) for item in reversed(stored)]
 
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            events_total = int(self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+            events_failed = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE status = 'failed'"
+                ).fetchone()[0]
+            )
+            dead_letters_total = int(
+                self._conn.execute("SELECT COUNT(*) FROM dead_letters").fetchone()[0]
+            )
+            audit_logs_total = int(
+                self._conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()[0]
+            )
+
+        return {
+            "events_total": events_total,
+            "events_failed": events_failed,
+            "dead_letters_total": dead_letters_total,
+            "audit_logs_total": audit_logs_total,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
