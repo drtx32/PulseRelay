@@ -1,9 +1,10 @@
 """
-Trigger Engine - 消息聚合 + 触发判断
+Trigger Engine - 多来源消息聚合 + 触发判断
 集成到 Signals，通过统一 queue 消费消息
 """
 
 import time
+from queue import Empty
 from typing import Optional
 from dataclasses import dataclass, field
 
@@ -23,6 +24,8 @@ class Message:
     content: str
     time: str
     local_id: int
+    source: str = ""
+    platform: str = ""
     chat_name: str = ""
     raw: dict = field(default_factory=dict)
 
@@ -32,6 +35,8 @@ class Message:
             chat=d.get("chat", ""),
             chat_name=d.get("chat_name", ""),
             sender=d.get("sender", ""),
+            source=d.get("source", ""),
+            platform=d.get("platform", ""),
             content=d.get("content", ""),
             time=d.get("time", ""),
             local_id=d.get("local_id", 0),
@@ -48,8 +53,11 @@ class TriggerResult:
 
 class TriggerEngine:
     """
-    消息聚合 + 触发判断
-    从 Signals.queue 消费消息，不自己管理 queue
+    多来源消息聚合 + 触发判断
+    从 Signals.queue 消费消息，不自己管理 queue。
+
+    content_threshold/message_threshold/idle_timeout 是默认全局聚合规则，
+    后续多 Agent 路由可以在 route 或 Agent 层覆盖这些规则。
     """
 
     def __init__(self, signals, config: TriggerConfig = None, monitor_chats: list[str] = None):
@@ -67,14 +75,14 @@ class TriggerEngine:
         try:
             key, raw = self.signals.queue.get(timeout=timeout)
             return key, raw
-        except:
+        except Empty:
             return None
 
     def process_raw(self, raw: dict):
         """处理原始消息"""
         msg = Message.from_dict(raw)
 
-        # 检查监控列表（支持 chat 或 chat_name）
+        # 检查监控列表（支持 chat 或 chat_name，对所有来源一致生效）
         if self.monitor_chats:
             chat_name = raw.get("chat_name", "")
             if msg.chat not in self.monitor_chats and chat_name not in self.monitor_chats:

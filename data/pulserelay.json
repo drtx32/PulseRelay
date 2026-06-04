@@ -1,0 +1,46 @@
+{
+  "config_version": 1,
+  "server": {
+    "title": "PulseRelay Gateway",
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+  "openclaw": {
+    "ws_host": "127.0.0.1",
+    "ws_port": 18800,
+    "ws_path": "/ws",
+    "sender_id": "test_user_001",
+    "sender_name": "TestUser",
+    "ws_token": ""
+  },
+  "handlers": {
+    "bark": {
+      "device_key": ""
+    }
+  },
+  "aggregation": {
+    "content_threshold": 1000,
+    "message_threshold": 10,
+    "idle_timeout": 20,
+    "min_trigger_interval": 5.0,
+    "monitor_chats": []
+  },
+  "templates": {
+    "message": "templates/message_summary_example.j2"
+  },
+  "sources": {
+    "weflow": {
+      "enabled": true,
+      "host": "localhost",
+      "port": 5031,
+      "access_token": ""
+    },
+    "lark": {
+      "enabled": false,
+      "callback_path": "/sources/lark/events",
+      "verification_token": "",
+      "encrypt_key": "",
+      "include_non_text": true
+    }
+  }
+}

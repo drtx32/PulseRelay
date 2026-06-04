@@ -1,5 +1,5 @@
 """
-WeFlow 数据源 - 通过 HTTP SSE 流消费微信消息
+WeFlow 数据源 - 通过 HTTP SSE 流消费消息。
 """
 
 import json
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class WeFlowSource(Module):
-    """微信数据源，通过 HTTP SSE 流消费消息"""
+    """WeFlow 数据源，通过 HTTP SSE 流消费平台消息。"""
 
     def __init__(
         self,
@@ -27,8 +27,7 @@ class WeFlowSource(Module):
         super().__init__(signals, enabled)
         self.host = host
         self.port = port
-        self.access_token = access_token or os.getenv(
-            "WEFLOW_TOKEN", "3bbdf1d0ed8ec3cd357894a9bdb99494")
+        self.access_token = access_token or os.getenv("WEFLOW_TOKEN", "")
         self.base_url = f"http://{self.host}:{self.port}/api/v1/push/messages"
 
     async def run(self):
@@ -59,20 +58,22 @@ class WeFlowSource(Module):
                         logger.debug(f"Failed to parse line: {e}")
                         continue
 
-                    # 字段适配：raw → Message 格式
+                    # 字段适配：raw → 聚合 Message 格式
                     # 去重用 timestamp + rawid（递增_timestamp + 随机_rawid）
                     rawid = raw.get("rawid", "")
                     timestamp = raw.get("timestamp", 0)
                     _time = datetime.fromtimestamp(
                         timestamp) if timestamp else datetime.now()
 
-                    # 超过5 min的消息忽略
-                    if time.time() - timestamp > 60 * 5:
+                    # 超过 5 min 的 WeFlow 历史消息忽略；无 timestamp 时按当前消息处理。
+                    if timestamp and time.time() - timestamp > 60 * 5:
                         logger.debug(
                             f"Ignored old message: {raw.get('content', '')[:30]}...")
                         continue
 
                     adapted = {
+                        "source": "weflow",
+                        "platform": "wechat",
                         "local_id": f"{timestamp}_{rawid}" if rawid else timestamp,
                         "chat": raw.get("sessionId", ""),
                         "chat_name": raw.get("groupName", raw.get("sourceName", "")),
@@ -82,7 +83,7 @@ class WeFlowSource(Module):
                         "raw": raw,
                     }
 
-                    self.signals.put("wechat_message", adapted)
+                    self.signals.put("weflow_message", adapted)
                     logger.info(
                         f"SENT [{adapted['chat_name']}] {adapted['sender']}: {adapted['content'][:30]}...")
 

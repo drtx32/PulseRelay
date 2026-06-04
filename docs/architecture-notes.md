@@ -129,3 +129,13 @@ Agent 是消息处理核心，建议按“一个实例一个配置”管理。
 - 一个 webhook 或 Bark 出口
 
 先跑通“多入口进来，统一路由到 Agent，再按策略回传”的闭环，再逐步增加更多入口和出口。
+
+
+## 当前实现约束补充
+- `templates/` 中的模板用于构建聚合后的统一消息，不绑定微信；WeFlow/微信模板只是示例。
+- WeFlow 是当前微信消息接入方式，源码命名使用 `sources/weflow.py`。
+- 当前聚合规则（最大消息条数、最大字符数、两条消息最大间隔/空闲超时）默认对所有消息源适用；后续多 Agent 路由可以按 Agent 或 route 覆盖这些规则。
+- Redis 可作为后续聚合状态存储和符合条件后的 push 通道；当前最小实现仍使用进程内 `TriggerEngine` 状态，并在触发后推送到 WebSocket Agent。
+
+- 当前配置先采用 OpenClaw 风格的单文件 JSON（默认 `data/pulserelay.json`），便于复制、回滚和后续迁移到 SQLite。
+- 飞书/Lark 当前作为 webhook ingress 接入，默认路径是 `/sources/lark/events`，支持 URL verification 和 `im.message.receive_v1` 与旧版 `message` 消息事件适配；加密回调先显式返回未支持，后续可引入 AES 依赖完善。

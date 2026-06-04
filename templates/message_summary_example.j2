@@ -1,14 +1,14 @@
-{# WeChat Monitor Message Template - Grouped by Chat #}
-{# Available variables: messages (list of dict) #}
-{# Each message has: sender, chat, content, time, etc. #}
+{# Aggregated Message Template - Grouped by Conversation #}
+{# Available variables: messages (list of Message objects) #}
+{# Common fields: source, platform, sender, chat, chat_name, content, time, raw #}
 
-📱 **微信监控摘要**
+📨 **聚合消息摘要**
 
 共 {{ messages|length }} 条消息
 
 {%- set grouped = messages|groupby('chat_name') %}
 {%- for chat_name, chat_messages in grouped %}
-**{{ chat_name }}**
+**{{ chat_name or '未命名会话' }}**
 
 {%- for msg in chat_messages %}
 [{{ msg.time }}] {{ msg.sender|default('未知') }}: {{ msg.content }}
