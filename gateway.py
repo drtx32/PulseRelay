@@ -17,15 +17,16 @@ from pathlib import Path
 
 import websockets
 import jinja2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from base import Signals, Module
+from base import Signals
+from config import load_config
 from core.trigger_engine import TriggerEngine, TriggerConfig, Message
-from sources import WeFlowSource
+from sources import LarkWebhookSource, WeFlowSource
 from handlers.bark import bark_notify, init_bark_handler
 
 # Load .env file
@@ -33,13 +34,19 @@ env_path = Path(__file__).parent / ".env"
 load_dotenv(env_path)
 
 # Configuration
-WS_HOST = os.getenv("WS_HOST", "127.0.0.1")
-WS_PORT = int(os.getenv("WS_PORT", "18800"))
-WS_PATH = os.getenv("WS_PATH", "/ws")
-SENDER_ID = os.getenv("SENDER_ID", "test_user_001")
-SENDER_NAME = os.getenv("SENDER_NAME", "TestUser")
-WS_TOKEN = os.getenv("WS_TOKEN", "")
-BARK_DEVICE_KEY = os.getenv("BARK_DEVICE_KEY", "")
+_CONFIG = load_config()
+_OPENCLAW_CONFIG = _CONFIG["openclaw"]
+_BARK_CONFIG = _CONFIG["handlers"]["bark"]
+_AGGREGATION_CONFIG = _CONFIG["aggregation"]
+_SOURCES_CONFIG = _CONFIG["sources"]
+
+WS_HOST = _OPENCLAW_CONFIG["ws_host"]
+WS_PORT = int(_OPENCLAW_CONFIG["ws_port"])
+WS_PATH = _OPENCLAW_CONFIG["ws_path"]
+SENDER_ID = _OPENCLAW_CONFIG["sender_id"]
+SENDER_NAME = _OPENCLAW_CONFIG["sender_name"]
+WS_TOKEN = _OPENCLAW_CONFIG.get("ws_token", "")
+BARK_DEVICE_KEY = _BARK_CONFIG.get("device_key", "")
 
 # Build WebSocket URL with optional token
 WS_URL = f"ws://{WS_HOST}:{WS_PORT}{WS_PATH}?senderId={SENDER_ID}&senderName={SENDER_NAME}"
@@ -50,7 +57,7 @@ if WS_TOKEN:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OpenClaw WebSocket Test Client")
+app = FastAPI(title=_CONFIG["server"].get("title", "PulseRelay Gateway"))
 
 # 挂载静态文件
 assets_path = Path(__file__).parent / "assets"
@@ -60,12 +67,12 @@ if assets_path.exists():
 # 当前连接的浏览器 WebSocket
 current_browser_ws: WebSocket | None = None
 
-# TriggerEngine 配置
+# TriggerEngine 配置：这些聚合规则对所有消息源适用。
 _trigger_config = TriggerConfig(
-    content_threshold=int(os.getenv("WX_CONTENT_THRESHOLD", "1000")),
-    message_threshold=int(os.getenv("WX_MESSAGE_THRESHOLD", "10")),
-    idle_timeout=float(os.getenv("WX_IDLE_TIMEOUT", "20")),
-    min_trigger_interval=5.0
+    content_threshold=int(_AGGREGATION_CONFIG.get("content_threshold", 1000)),
+    message_threshold=int(_AGGREGATION_CONFIG.get("message_threshold", 10)),
+    idle_timeout=float(_AGGREGATION_CONFIG.get("idle_timeout", 20)),
+    min_trigger_interval=float(_AGGREGATION_CONFIG.get("min_trigger_interval", 5.0)),
 )
 
 # 全局状态
@@ -106,14 +113,14 @@ async def _handle_trigger_async(content: str):
     # 先把摘要发送到浏览器显示
     if current_browser_ws:
         try:
-            wx_msg = {
-                "type": "wx.monitor.message",
+            aggregate_msg = {
+                "type": "relay.aggregate.message",
                 "content": content,
                 "senderId": SENDER_ID,
                 "senderName": SENDER_NAME
             }
-            await current_browser_ws.send_text(json.dumps(wx_msg))
-            logger.info("Sent wx_monitor message to browser")
+            await current_browser_ws.send_text(json.dumps(aggregate_msg))
+            logger.info("Sent aggregate message to browser")
         except Exception as e:
             logger.error(f"Failed to send to browser: {e}")
 
@@ -130,7 +137,7 @@ async def _forward_to_openclaw_async(content: str, senderId: str, senderName: st
         async with websockets.connect(WS_URL) as openclaw_ws:
             msg = {
                 "type": "chat.send",
-                "messageId": f"msg_wx_{int(time.time() * 1000)}",
+                "messageId": f"msg_relay_{int(time.time() * 1000)}",
                 "content": content,
                 "senderId": senderId,
                 "senderName": senderName
@@ -142,7 +149,7 @@ async def _forward_to_openclaw_async(content: str, senderId: str, senderName: st
                 msg_data = json.loads(message)
 
                 if current_browser_ws:
-                    msg_data["fromWxMonitor"] = True
+                    msg_data["fromPulseRelay"] = True
                     await current_browser_ws.send_text(json.dumps(msg_data))
 
                 if msg_data.get("type") == "chat.stream":
@@ -172,12 +179,11 @@ def _main_loop():
     while True:
         try:
             # 从 queue 获取消息（非阻塞）
-            try:
-                key, raw = _signals.queue.get(timeout=0.1)
-                if key == 'wechat_message':
+            item = _trigger_engine.consume_signals(timeout=0.1)
+            if item:
+                key, raw = item
+                if key.endswith("_message"):
                     _trigger_engine.process_raw(raw)
-            except:
-                pass
 
             # 检查触发条件
             result = _trigger_engine.check_trigger()
@@ -186,10 +192,6 @@ def _main_loop():
 
             # 小延迟避免 busy loop
             time.sleep(0.5)
-
-        except Exception as e:
-            logger.error(f"Main loop error: {e}")
-            _handle_trigger(result)
 
         except Exception as e:
             logger.error(f"Main loop error: {e}")
@@ -220,7 +222,7 @@ def startup():
     global _signals, _trigger_engine, _sources, _template
 
     # 加载模板
-    template_path_str = os.getenv("WX_TEMPLATE", "templates/wx_template_example.j2")
+    template_path_str = _CONFIG.get("templates", {}).get("message", "templates/message_summary_example.j2")
     template_path = Path(__file__).parent / template_path_str
     if template_path.exists():
         with open(template_path, 'r', encoding='utf-8') as f:
@@ -232,35 +234,46 @@ def startup():
 
     # 初始化 Signals
     _signals = Signals()
+    _sources = {}
 
     # 初始化 Bark handler
     init_bark_handler(BARK_DEVICE_KEY)
     logger.info(f"Bark enabled: {bool(BARK_DEVICE_KEY)}")
 
-    # 解析监控群聊列表
-    wx_chats_raw = os.getenv("WX_MONITOR_CHATS", "")
-    wx_monitor_chats = [c.strip() for c in wx_chats_raw.split(",") if c.strip()]
+    # 读取监控会话列表（对所有消息源适用）
+    monitor_chats = _AGGREGATION_CONFIG.get("monitor_chats", [])
+    if isinstance(monitor_chats, str):
+        monitor_chats = [c.strip() for c in monitor_chats.split(",") if c.strip()]
 
     # 初始化 TriggerEngine
     _trigger_engine = TriggerEngine(
         signals=_signals,
         config=_trigger_config,
-        monitor_chats=wx_monitor_chats
+        monitor_chats=monitor_chats
     )
 
     # 初始化数据源
-    wx_host = os.getenv("WEFLOW_HOST", "localhost")
-    wx_port = int(os.getenv("WEFLOW_PORT", "5031"))
-    wx_token = os.getenv("WEFLOW_TOKEN", "3bbdf1d0ed8ec3cd357894a9bdb99494")
+    weflow_config = _SOURCES_CONFIG.get("weflow", {})
+    if weflow_config.get("enabled", True):
+        _sources["weflow"] = WeFlowSource(
+            signals=_signals,
+            host=weflow_config.get("host", "localhost"),
+            port=int(weflow_config.get("port", 5031)),
+            access_token=weflow_config.get("access_token", ""),
+            enabled=True
+        )
+        _signals.register_source("weflow", _sources["weflow"])
 
-    _sources['wechat'] = WeFlowSource(
-        signals=_signals,
-        host=wx_host,
-        port=wx_port,
-        access_token=wx_token,
-        enabled=True
-    )
-    _signals.register_source('wechat', _sources['wechat'])
+    lark_config = _SOURCES_CONFIG.get("lark", {})
+    if lark_config.get("enabled", False):
+        _sources["lark"] = LarkWebhookSource(
+            signals=_signals,
+            verification_token=lark_config.get("verification_token", ""),
+            encrypt_key=lark_config.get("encrypt_key", ""),
+            include_non_text=bool(lark_config.get("include_non_text", True)),
+            enabled=True,
+        )
+        _signals.register_source("lark", _sources["lark"])
 
     # 启动数据源线程
     for name, src in _sources.items():
@@ -286,18 +299,33 @@ def shutdown():
     logger.info("Shutdown complete")
 
 
+@app.post(_SOURCES_CONFIG.get("lark", {}).get("callback_path", "/sources/lark/events"))
+async def lark_events(raw: dict):
+    """飞书/Lark 事件订阅回调入口。"""
+    source = _sources.get("lark")
+    if not source or not source.enabled:
+        raise HTTPException(status_code=404, detail="lark source disabled")
+
+    result = source.handle_event(raw)
+    if result.get("error") == "invalid_lark_verification_token":
+        raise HTTPException(status_code=401, detail=result["error"])
+    if result.get("error") == "encrypted_lark_callback_not_supported":
+        raise HTTPException(status_code=501, detail=result["error"])
+    return result
+
+
 @app.post("/queue-message")
 async def queue_message(raw: dict):
     """兼容旧接口：直接接收消息放入 queue（不推荐，新数据源应继承 Module）"""
     if _signals:
-        _signals.put('wechat_message', raw)
+        _signals.put('manual_message', raw)
         return {"status": "queued"}
     return {"status": "signals_not_ready"}
 
 class SendMessageRequest(BaseModel):
     content: str
-    senderId: str = "wx_monitor"
-    senderName: str = "WeChat Monitor"
+    senderId: str = "pulserelay"
+    senderName: str = "PulseRelay"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -306,7 +334,7 @@ async def get_html():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>OpenClaw WebSocket Test</title>
+        <title>PulseRelay Gateway</title>
         <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
         <style>
             body { font-family: Arial, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; }
@@ -323,8 +351,8 @@ async def get_html():
             .typing { color: #999; font-style: italic; }
             .error { color: #cc0000; }
             .system { color: #666; font-style: italic; }
-            .wx-monitor { color: #9933ff; background: #f3e6ff; padding: 10px; border-radius: 5px; margin: 10px 0; }
-            .wx-monitor::before { content: "📱 WeChat Summary: "; font-weight: bold; color: #9933ff; }
+            .aggregate { color: #9933ff; background: #f3e6ff; padding: 10px; border-radius: 5px; margin: 10px 0; }
+            .aggregate::before { content: "📨 Aggregate Summary: "; font-weight: bold; color: #9933ff; }
             pre { background: #f4f4f4; padding: 10px; border-radius: 5px; overflow-x: auto; }
             code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }
             pre code { background: none; padding: 0; }
@@ -342,7 +370,7 @@ async def get_html():
         </style>
     </head>
     <body>
-        <h1>OpenClaw Gateway</h1>
+        <h1>PulseRelay Gateway</h1>
         <div id="status" class="status disconnected">Disconnected</div>
 
         <div id="stats">
@@ -422,7 +450,7 @@ async def get_html():
                 ws = new WebSocket('ws://' + window.location.host + '/ws');
 
                 ws.onopen = () => {
-                    document.getElementById('status').textContent = 'Connected to OpenClaw';
+                    document.getElementById('status').textContent = 'Connected to PulseRelay';
                     document.getElementById('status').className = 'status connected';
                     addMessage('system', 'Connected');
                 };
@@ -463,8 +491,8 @@ async def get_html():
                         finalizeStream();
                         addMessage('error', 'Error: ' + (msg.error || 'Unknown error'));
                         break;
-                    case 'wx.monitor.message':
-                        addWxMonitorMessage(msg.content);
+                    case 'relay.aggregate.message':
+                        addAggregateMessage(msg.content);
                         break;
                 }
             }
@@ -472,8 +500,8 @@ async def get_html():
             function updateStreamContent(msg) {
                 const messages = document.getElementById('messages');
                 let last = messages.lastElementChild;
-                const className = msg.fromWxMonitor ? 'wx-monitor' : 'agent';
-                if (!last || (last.className !== 'agent' && last.className !== 'wx-monitor')) {
+                const className = msg.fromPulseRelay ? 'aggregate' : 'agent';
+                if (!last || (last.className !== 'agent' && last.className !== 'aggregate')) {
                     last = document.createElement('div');
                     last.className = className;
                     messages.appendChild(last);
@@ -522,10 +550,10 @@ async def get_html():
                 document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
             }
 
-            function addWxMonitorMessage(content) {
+            function addAggregateMessage(content) {
                 const messages = document.getElementById('messages');
                 const div = document.createElement('div');
-                div.className = 'wx-monitor';
+                div.className = 'aggregate';
                 div.innerHTML = marked.parse(content);
                 messages.appendChild(div);
                 messages.scrollTop = messages.scrollHeight;
@@ -641,13 +669,14 @@ async def get_stats():
     if _trigger_engine:
         stats = _trigger_engine.get_stats()
         config = _trigger_engine.config
-        monitor_chats = _trigger_engine.monitor_chats or ["所有群"]
+        monitor_chats = _trigger_engine.monitor_chats or ["所有会话"]
         return {
             "status": "running",
             "messages": stats["message_count"],
             "total_chars": stats["total_chars"],
             "idle_seconds": round(stats["idle_seconds"], 1),
             "seen_keys": stats["seen_keys"],
+            "waiting_for_message": stats["waiting_for_message"],
             "config": {
                 "content_threshold": config.content_threshold,
                 "message_threshold": config.message_threshold,
@@ -665,4 +694,4 @@ if __name__ == "__main__":
     print(f"OpenClaw WebSocket URL: {WS_URL}")
     print(f"Bark enabled: {bool(BARK_DEVICE_KEY)}")
     print(f"Open http://localhost:8000 in your browser to test")
-    uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+    uvicorn.run(app, host=_CONFIG["server"].get("host", "0.0.0.0"), port=int(_CONFIG["server"].get("port", 8000)), access_log=False)

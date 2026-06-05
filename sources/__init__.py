@@ -1,3 +1,4 @@
-from .wechat import WeFlowSource
+from .weflow import WeFlowSource
+from .lark import LarkWebhookSource
 
-__all__ = ['WeFlowSource']
+__all__ = ['WeFlowSource', 'LarkWebhookSource']

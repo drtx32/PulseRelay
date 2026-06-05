@@ -17,7 +17,7 @@ class BarkHandler:
         self,
         title: str,
         content: str,
-        group: str = "WeChat",
+        group: str = "PulseRelay",
         icon: str = "https://s41.ax1x.com/2026/05/19/pexveh9.png"
     ) -> bool:
         """Send notification via Bark"""
@@ -55,7 +55,7 @@ def init_bark_handler(device_key: str):
     _bark_handler = BarkHandler(device_key)
 
 
-def bark_notify(title: str, content: str, group: str = "WeChat") -> bool:
+def bark_notify(title: str, content: str, group: str = "PulseRelay") -> bool:
     """Send Bark notification"""
     if _bark_handler:
         return _bark_handler.notify(title, content, group)
