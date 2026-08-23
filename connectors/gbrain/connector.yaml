@@ -1,0 +1,35 @@
+id: gbrain
+enabled: true
+restart: always
+restart_delay_seconds: 10
+command:
+- python
+- /connectors/gbrain/connector.py
+watch_paths:
+- notes/trendradar-digests/**
+- notes/ashare-observation/**
+ignore_paths:
+- notes/ashare-observation/*plan*
+- notes/ashare-observation/**/*plan*
+polling_interval_seconds: 60
+webhooks:
+- name: Multica Autopilot - GBrain 更新摘要-企业微信-Webhook
+  url: https://multica.ai/api/webhooks/autopilots/awt_Ejb7afN28cdgaDTW3RHp94mpqDSNIoWxhCpQ3MJXipQ
+  enabled: true
+aggregation:
+  enabled: true
+  max_events: 1
+  max_chars: 0
+  idle_timeout_seconds: 0.0
+  max_wait_seconds: 0.0
+env:
+  GBRAIN_MCP_URL: ${GBRAIN_MCP_URL}
+  GBRAIN_MCP_TOKEN: ${GBRAIN_MCP_TOKEN}
+  GBRAIN_CLIENT_ID: ${GBRAIN_CLIENT_ID}
+  GBRAIN_CLIENT_SECRET: ${GBRAIN_CLIENT_SECRET}
+  GBRAIN_OAUTH_TOKEN_URL: ${GBRAIN_OAUTH_TOKEN_URL}
+  GBRAIN_OAUTH_SCOPE: ${GBRAIN_OAUTH_SCOPE}
+  GBRAIN_LIST_RUNS_TOOL: ${GBRAIN_LIST_RUNS_TOOL}
+  GBRAIN_GET_OUTPUT_TOOL: ${GBRAIN_GET_OUTPUT_TOOL}
+  GBRAIN_LIST_RUNS_ARGS_JSON: ${GBRAIN_LIST_RUNS_ARGS_JSON}
+  GBRAIN_GET_OUTPUT_ARGS_JSON: ${GBRAIN_GET_OUTPUT_ARGS_JSON}

@@ -1,0 +1,61 @@
+services:
+  pulserelay:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+      - path: .gbrain-admin.env
+        required: false
+    environment:
+      PULSERELAY_DB_PATH: /data/pulserelay.db
+      PULSERELAY_CONNECTOR_ROOT: /connectors
+      GBRAIN_ADMIN_URL: ${GBRAIN_ADMIN_URL:-http://gbrain:8088}
+    volumes:
+      - pulserelay-data:/data
+      - ./connectors:/connectors
+    restart: unless-stopped
+    networks:
+      - default
+      - gbrain_default
+
+  pulserelay-worker:
+    build: .
+    command: ["python", "-m", "workers.delivery_worker"]
+    environment:
+      PULSERELAY_DB_PATH: /data/pulserelay.db
+      PULSERELAY_WORKER_ID: docker-worker
+      PULSERELAY_WORKER_INTERVAL: "1"
+    volumes:
+      - pulserelay-data:/data
+    restart: unless-stopped
+
+  pulserelay-connectors:
+    build: .
+    command: ["python", "-m", "core.connector_supervisor"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PULSERELAY_API_URL: http://pulserelay:8000
+      PULSERELAY_CONNECTOR_ROOT: /connectors
+      PULSERELAY_CONNECTOR_STATE_ROOT: /var/lib/pulserelay/connectors
+    volumes:
+      - ./connectors:/connectors:ro
+      - pulserelay-connector-state:/var/lib/pulserelay/connectors
+    depends_on:
+      pulserelay:
+        condition: service_started
+    networks:
+      - default
+      - gbrain_default
+    restart: unless-stopped
+
+volumes:
+  pulserelay-data:
+  pulserelay-connector-state:
+
+networks:
+  gbrain_default:
+    external: true

@@ -341,7 +341,10 @@ Recommended checkpoint shape:
 
 ## 5.3 GBrain source connector
 
-The first high-value polling connector should be `GBrainSource`.
+The first high-value polling connector should be the mounted
+`connectors/gbrain/` connector. Its polling and normalization logic may be
+implemented as `GBrainSource` internally, but it must run as an independent
+connector process and submit normalized events to PulseRelay.
 
 It must discover task runs satisfying:
 
@@ -849,10 +852,10 @@ POST   /v1/routes
 GET    /v1/routes/{route_id}
 PUT    /v1/routes/{route_id}
 
-GET    /v1/destinations
-POST   /v1/destinations
-PUT    /v1/destinations/{destination_id}
-POST   /v1/destinations/{destination_id}/test
+GET    /v1/webhooks
+POST   /v1/webhooks
+PUT    /v1/webhooks/{webhook_id}
+DELETE /v1/webhooks/{webhook_id}
 
 GET    /v1/batches
 GET    /v1/batches/{batch_id}
@@ -1037,14 +1040,13 @@ core/
   templates.py
   security.py
 
-sources/
-  gbrain.py
-  polling.py
-  stdio.py
-  websocket.py
-
-plugins/
-  webhook_source.py
+connectors/
+  gbrain/
+    connector.py
+    connector.yaml
+  polling/
+  stdio/
+  websocket/
 
 api/
   events.py

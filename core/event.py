@@ -7,6 +7,7 @@ raw message dictionaries across the codebase.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -161,7 +162,13 @@ class EventEnvelope:
 
         dedupe_key = ""
         if chat and local_id:
-            dedupe_key = f"{source_type}:{chat}:{local_id}"
+            # SmsForwarder local_id is operator-controlled and is commonly
+            # configured as timestamp + sender + message body. Never expose
+            # that value in the persisted/event-visible dedupe key.
+            stable_local_id = local_id
+            if source_type == "sms_forwarder":
+                stable_local_id = hashlib.sha256(str(local_id).encode("utf-8")).hexdigest()[:24]
+            dedupe_key = f"{source_type}:{chat}:{stable_local_id}"
 
         return cls(
             source=EventSource(type=source_type, id=chat, name=chat_name),

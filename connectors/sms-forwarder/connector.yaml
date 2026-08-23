@@ -1,0 +1,22 @@
+id: sms-forwarder
+enabled: true
+restart: always
+restart_delay_seconds: 10
+command:
+- python
+- /connectors/sms-forwarder/connector.py
+polling_interval_seconds: 60
+webhooks:
+- name: 企业微信 - 智能体小组
+  url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=6386b399-96a0-49a3-8b29-9a31a656d75e
+  enabled: true
+aggregation:
+  enabled: true
+  max_events: 3
+  max_chars: 0
+  idle_timeout_seconds: 0
+  max_wait_seconds: 0
+env:
+  PULSERELAY_API_URL: ${PULSERELAY_API_URL}
+  WEIXIN_WORK_WEBHOOK_URL: ${WEIXIN_WORK_WEBHOOK_URL}
+  SMS_FORWARDER_INITIAL_SYNC_SKIP: 'true'

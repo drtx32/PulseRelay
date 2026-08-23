@@ -1,0 +1,17 @@
+id: my-source
+enabled: false
+restart: always
+restart_delay_seconds: 5
+command: ["python", "/connectors/my-source/connector.py"]
+polling_interval_seconds: 60
+aggregation:
+  enabled: false
+  max_events: 3
+  max_chars: 0
+  idle_timeout_seconds: 0
+  max_wait_seconds: 0
+webhooks: []
+env:
+  GITHUB_REPOSITORY: "${GITHUB_REPOSITORY}"
+  GITHUB_API_URL: "https://api.github.com"
+  INITIAL_SYNC_LIMIT: "1"

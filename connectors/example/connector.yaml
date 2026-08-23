@@ -1,0 +1,15 @@
+id: example
+enabled: false
+restart: always
+restart_delay_seconds: 2
+command:
+- python
+- /connectors/example/connector.py
+polling_interval_seconds: 60
+aggregation:
+  enabled: false
+  max_events: 3
+  max_chars: 0
+  idle_timeout_seconds: 0.0
+  max_wait_seconds: 0.0
+webhooks: []

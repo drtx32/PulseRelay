@@ -1,120 +1,86 @@
 # PulseRelay
 
-PulseRelay is an AI-first event relay for agents, humans, and tools.
-
-It starts as a lightweight local gateway that can listen to realtime sources such as WeFlow/WeChat streams, aggregate noisy messages, and deliver actionable notifications through channels such as Bark or WebSocket. The long-term goal is to evolve it into an event-native agent orchestration layer: every inbound signal is normalized into a structured event, routed by rules and AI, and then handled by local or remote agent runtimes.
-
-## Why PulseRelay
-
-Traditional notification tools usually treat input as a message:
+PulseRelay is a durable event gateway for automation systems. It accepts
+normalized events from mounted connectors or inbound webhook hooks, persists
+them before side effects, matches routes, aggregates events, and delivers
+independent outbound webhook jobs with retries, leases, idempotency keys,
+audit logs, and dead letters.
 
 ```text
-message in -> notification out
+mounted connector / inbound hook
+        -> durable event store
+        -> route + aggregation
+        -> delivery jobs
+        -> outbound webhook worker
 ```
 
-PulseRelay treats input as an event:
+## Run with Docker
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+curl http://localhost:8000/healthz
+```
+
+Compose starts:
+
+- `pulserelay`: HTTP API and generated inbound hook management;
+- `pulserelay-worker`: durable outbound webhook worker;
+- `pulserelay-connectors`: supervisor for scripts mounted from `./connectors`.
+
+The root URL serves the lightweight Paper-style Event Desk. Enter the value of
+`PULSERELAY_ADMIN_TOKEN` as the PulseRelay admin Bearer token. Event reads
+at `/v1/events` and `/v1/events/{event_id}` require that Bearer credential;
+`/healthz` remains public for uptime checks.
+
+SQLite data is stored in the `pulserelay-data` volume. Connector logs,
+supervisor state, and connector checkpoints are stored in
+`pulserelay-connector-state`.
+
+## Add a connector
+
+Create a directory containing `connector.yaml` and a script:
 
 ```text
-source + sender + event + content + context + policy -> route -> agent/action/delivery
+connectors/my-source/
+├── connector.yaml
+└── connector.py
 ```
 
-This makes it suitable for AI-native workflows where a message is not just something to display, but something that can trigger summarization, prioritization, approval, tool calls, or local agent work.
+The supervisor starts enabled manifests automatically, restarts failed
+processes, and injects:
 
-## Current Status
+- `PULSERELAY_INGEST_URL` — normalized event endpoint;
+- `PULSERELAY_HOOK_URL` — optional generated hook URL;
+- `PULSERELAY_STATE_DIR` — persistent writable state directory;
+- `PULSERELAY_LOG_FILE` — persistent connector log path;
+- `PULSERELAY_CONNECTOR_ID` — connector identifier.
 
-The current codebase is an early prototype. It already includes:
+See `connectors/my-source/` for a working GitHub Releases polling connector and
+`connectors/gbrain/` for the HTTP MCP polling connector.
+It is disabled by default; set `enabled: true` after configuring the
+repository in `.env`.
 
-- A shared `Signals` queue and `Module` base class for source modules.
-- A `TriggerEngine` that aggregates messages and triggers when content length, message count, or idle timeout thresholds are reached.
-- A FastAPI gateway with WebSocket support.
-- A WeFlow/WeChat-oriented source path.
-- Bark notification support for iOS push delivery.
+## Inbound hooks
 
-The current prototype is still message-centric. The planned architecture is event-centric.
+Generate a hook:
 
-## Target Architecture
-
-```text
-External Sources
-  WeFlow / Feishu / Slack / GitHub / Webhook / Cron / Local events
-        |
-        v
-Source Adapters
-  verify -> normalize -> dedupe
-        |
-        v
-Event Bus / Event Inbox
-  persist -> queue -> replay -> rate limit
-        |
-        v
-Router / Policy Engine
-  rules -> AI classification -> capability matching -> approval gate
-        |
-        v
-Agent Runtime / Action Layer
-  local runner -> CLI agents -> MCP tools -> webhooks -> APIs
-        |
-        v
-Delivery Layer
-  Bark / Feishu / Slack / Email / WebSocket / GitHub comments
+```bash
+curl -X POST http://localhost:8000/v1/hooks \
+  -H 'content-type: application/json' \
+  -d '{"id":"demo","name":"Demo source"}'
 ```
 
-## Core Concepts
+The generated secret-bearing URL is returned once. Secrets are stored as
+salted PBKDF2 verifiers. Requests support body limits, content-type allowlists,
+optional HMAC timestamp validation, deterministic duplicate handling, and
+sandboxed normalization/response templates.
 
-### Event Envelope
-
-A normalized event object that carries source, sender, content, context, permissions, routing metadata, and raw platform payload.
-
-See [`docs/event-envelope.md`](docs/event-envelope.md).
-
-### Source Adapter
-
-A source adapter connects to an external source and converts platform-specific events into a PulseRelay event envelope. A source can be a webhook receiver, a WebSocket/SSE listener, a cron trigger, or a local file/process watcher.
-
-### Event Bus
-
-The event bus receives normalized events, deduplicates them, and makes them available to routers, triggers, agents, and delivery handlers.
-
-### Router / Policy Engine
-
-The router decides what should happen next. It can combine deterministic rules, natural-language rules, LLM classification, sender trust, capability matching, and approval policies.
-
-### Agent Runtime
-
-A runtime executes work on behalf of a routed event. It can be a cloud worker, a local runner, a CLI coding agent, an MCP server, or a webhook-based external agent.
-
-See [`docs/agent-runtime.md`](docs/agent-runtime.md).
-
-### Delivery Handler
-
-A delivery handler sends the result to a human, system, or another agent. Examples include Bark push, Feishu messages, Slack messages, GitHub comments, email, or outbound webhooks.
-
-## Short-Term Roadmap
-
-See [`docs/roadmap.md`](docs/roadmap.md).
-
-High-level phases:
-
-1. Document the event-native architecture and stabilize the current prototype.
-2. Introduce `EventEnvelope` while keeping compatibility with the existing message trigger flow.
-3. Split source adapters, triggers, routers, runtimes, and deliveries into explicit extension points.
-4. Add a local runner protocol for running local AI agents safely through an outbound WebSocket connection.
-5. Add replay, audit log, approval gates, and plugin manifests.
+See `docs/docker.md` and `docs/webhook-native.md` for configuration and API
+details.
 
 ## Development
 
-Create a `.env` file from `.env.example`, then run the gateway:
-
-```bash
-uvicorn gateway:app --reload --port 8000
-```
-
-This command reflects the current prototype entrypoint and may change as the project moves toward the event-native architecture.
-
-## Project Direction
-
-PulseRelay is not just a push-notification bridge. The intended direction is:
-
-> AI-first event relay and local agent runtime gateway.
-
-It should eventually feel like a small, developer-friendly control plane for routing realtime events to AI agents, humans, and tools.
+Install `requirements.txt`, then run the tests with pytest. The supported
+runtime entrypoint is `api:create_app`; Docker Compose is the recommended
+local deployment.
