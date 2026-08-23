@@ -34,7 +34,7 @@ if not OAUTH_TOKEN_URL and MCP_URL:
 LIST_RUNS_TOOL = os.environ.get("GBRAIN_LIST_RUNS_TOOL", "list_pages")
 GET_OUTPUT_TOOL = os.environ.get("GBRAIN_GET_OUTPUT_TOOL", "get_page")
 INGEST_URL = os.environ.get("PULSERELAY_INGEST_URL", "").strip()
-INTERVAL = max(5, int(os.environ.get("POLL_INTERVAL_SECONDS", "60")))
+INTERVAL = max(5, int(float(os.environ.get("POLL_INTERVAL_SECONDS", "60"))))
 STATE_DIR = Path(os.environ.get("PULSERELAY_STATE_DIR", ".state"))
 STATE_FILE = STATE_DIR / "checkpoint.json"
 WATCH_PATHS = json.loads(os.environ.get("PULSERELAY_WATCH_PATHS_JSON", "[]"))
