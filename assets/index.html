@@ -135,6 +135,18 @@
       .sidebar>div:nth-child(2),.sidebar-mobile-open .sidebar>div:nth-child(2){top:64px!important}
     }
   </style>
+  <style id="connector-mobile-static-layout">
+    @media (max-width:900px){
+      #connectors-view{min-height:0!important;overflow:hidden!important}
+      #connectors-view .connector-layout{display:block!important;height:auto!important;min-height:0!important;overflow:visible!important}
+      #connectors-view #connector-list{display:block!important;width:100%!important;min-width:0!important;max-width:none!important;box-sizing:border-box!important}
+      #connectors-view #connector-details{position:fixed!important;left:12px!important;right:12px!important;top:76px!important;bottom:12px!important;width:auto!important;height:auto!important;min-width:0!important;max-width:none!important;max-height:none!important;z-index:1002!important;display:flex!important;flex-direction:column!important;overflow:hidden!important;box-sizing:border-box!important;background:var(--surface)!important;box-shadow:0 24px 80px rgba(36,29,20,.28)!important}
+      #connectors-view #connector-details.hidden{display:none!important}
+      #connectors-view #connector-details>.panel-head{flex:0 0 auto}
+      #connectors-view #connector-details>div:not(.panel-head){min-height:0;overflow:auto;overflow-wrap:anywhere}
+      #connectors-view #connector-details pre{max-width:100%;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;word-break:break-word}
+    }
+  </style>
 </head>
 <body>
   <section id="login">
