@@ -31,6 +31,23 @@ def test_durable_fanout_and_route_scoped_batch(tmp_path: Path):
     assert {item.destination_id for item in deliveries} == {"one", "two"}
 
 
+def test_disabled_aggregation_delivers_each_event_immediately(tmp_path: Path):
+    store = SQLitePhase9Store(tmp_path / "disabled-aggregation.db")
+    store.upsert_destination("one", "One", "https://example.test/one")
+    store.upsert_route("r", "Immediate", {"source.type": "wechat"},
+                       {"enabled": False, "max_events": 0, "max_chars": 0,
+                        "idle_timeout_seconds": 0, "max_wait_seconds": 0},
+                       destinations=["one"])
+    relay = DurableRelay(store)
+
+    relay.ingest(event("e1", "first"))
+    relay.ingest(event("e2", "second"))
+
+    deliveries = store.list_deliveries()
+    assert len(deliveries) == 2
+    assert all(item.batch_id for item in deliveries)
+
+
 def test_gbrain_connector_normalizes_completed_output():
     payload = normalize_run({"id": "run-1", "status": "completed", "verification": "passed",
                              "output_slug": "notes/1", "completed_at": "2026-08-19T08:20:00+00:00"}, "digest")

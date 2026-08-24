@@ -255,6 +255,26 @@ def _connector_aggregation(source_type: str) -> dict[str, Any]:
     return {}
 
 
+def _route_source_type(route) -> str:
+    return str(route.match.get("source.type") or str(route.match.get("event.type", "")).split(".", 1)[0])
+
+
+def _sync_connector_aggregation(store: SQLitePhase9Store, source_type: str, aggregation: dict[str, Any]) -> None:
+    """Keep connector-level aggregation changes in the routes that execute them."""
+    for route in store.list_routes():
+        if _route_source_type(route) != source_type:
+            continue
+        store.upsert_route(
+            route.id,
+            route.name,
+            route.match,
+            dict(aggregation),
+            route.trigger,
+            route.enabled,
+            store.route_destinations(route.id),
+        )
+
+
 def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     store = store or SQLitePhase9Store(os.getenv("PULSERELAY_DB_PATH", "data/pulserelay.db"))
     event_bus = EventBus()
@@ -705,6 +725,10 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         except OSError as exc:
             raise HTTPException(500, f"unable to write connector manifest: {exc}")
         connector_index.refresh(force=True)
+        # The worker executes route records, not connector.yaml directly.
+        # Propagate the connector setting so disabling aggregation means
+        # immediate one-event delivery instead of leaving a stale route policy.
+        _sync_connector_aggregation(store, connector_id.replace("-", "_"), aggregation)
         return {"connector": connector_id, "polling_interval_seconds": data["polling_interval_seconds"], "aggregation": aggregation}
 
     # GBrain MCP administration is deliberately server-side: the browser only
