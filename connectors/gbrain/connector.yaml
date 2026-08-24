@@ -8,6 +8,7 @@ command:
 watch_paths:
 - notes/trendradar-digests/**
 - notes/ashare-observation/**
+- notes/github-weekly-trends/**
 ignore_paths:
 - notes/ashare-observation/*plan*
 - notes/ashare-observation/**/*plan*
