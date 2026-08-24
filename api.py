@@ -282,6 +282,13 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     connector_root = Path(os.getenv("PULSERELAY_CONNECTOR_ROOT", "connectors"))
     connector_index = get_connector_index(connector_root, os.getenv("PULSERELAY_CONNECTOR_INDEX_PATH", "/data/connectors.index.json"))
     connector_index.refresh(force=True)
+    # Routes are the execution records, but connector.yaml is the default
+    # source policy. Reconcile generated connector routes at startup so a
+    # changed manifest cannot leave the worker using a stale aggregation mode.
+    for item in connector_index.items():
+        connector_id = str(item.get("id") or "")
+        if connector_id:
+            _sync_connector_aggregation(store, connector_id.replace("-", "_"), _connector_aggregation(connector_id))
     app = FastAPI(title="PulseRelay", version="1.0")
     event_stream = EventStreamHub()
     event_bus_task: asyncio.Task | None = None

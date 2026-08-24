@@ -74,7 +74,26 @@ class Aggregator:
     def flush_due(self, now: datetime | None = None) -> list[BatchRecord]:
         current = now or datetime.now(timezone.utc)
         ready = []
+        routes = {route.id: route for route in self.store.list_routes()}
         for batch in self.store.list_collecting_batches():
+            route = routes.get(batch.route_id)
+            policy = route.aggregation if route else {}
+            active_limits = [
+                float(policy.get("max_events", 0) or 0),
+                float(policy.get("max_chars", 0) or 0),
+                float(policy.get("idle_timeout_seconds", 0) or 0),
+                float(policy.get("max_wait_seconds", 0) or 0),
+            ]
+            # A policy can change while a batch is collecting. Re-evaluate
+            # the existing batch so disabling aggregation (or setting
+            # max_events=1) cannot leave the first event stranded forever.
+            immediate = policy.get("enabled") is False or not policy or not any(value > 0 for value in active_limits)
+            max_events = int(policy.get("max_events", 0) or 0)
+            max_chars = int(policy.get("max_chars", 0) or 0)
+            if immediate or (max_events > 0 and batch.event_count >= max_events) or (max_chars > 0 and batch.total_chars >= max_chars):
+                self.store.mark_batch_ready(batch.id)
+                ready.append(self.store.get_batch(batch.id))
+                continue
             if (_parse(batch.idle_deadline_at) and _parse(batch.idle_deadline_at) <= current) or _parse(batch.max_wait_deadline_at) <= current:
                 self.store.mark_batch_ready(batch.id)
                 ready.append(self.store.get_batch(batch.id))

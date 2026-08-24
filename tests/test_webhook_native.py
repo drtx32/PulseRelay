@@ -48,6 +48,20 @@ def test_disabled_aggregation_delivers_each_event_immediately(tmp_path: Path):
     assert all(item.batch_id for item in deliveries)
 
 
+def test_policy_change_releases_existing_batch(tmp_path: Path):
+    store = SQLitePhase9Store(tmp_path / "policy-change.db")
+    store.upsert_destination("one", "One", "https://example.test/one")
+    store.upsert_route("r", "Batched", {"source.type": "wechat"},
+                       {"enabled": True, "max_events": 3}, destinations=["one"])
+    relay = DurableRelay(store)
+    relay.ingest(event("e1"))
+    assert store.list_deliveries() == []
+    store.upsert_route("r", "Immediate", {"source.type": "wechat"},
+                       {"enabled": False}, destinations=["one"])
+    relay.flush()
+    assert len(store.list_deliveries()) == 1
+
+
 def test_gbrain_connector_normalizes_completed_output():
     payload = normalize_run({"id": "run-1", "status": "completed", "verification": "passed",
                              "output_slug": "notes/1", "completed_at": "2026-08-19T08:20:00+00:00"}, "digest")
