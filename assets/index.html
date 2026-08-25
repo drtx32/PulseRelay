@@ -394,6 +394,8 @@
     const closeFinalRouteEditor=()=>{const editor=$('#node-editor');if(!editor)return;if(editor.tagName==='DIALOG'&&editor.open)editor.close();editor.classList.add('hidden');syncFinalRouteBackdrop()};
     finalRouteBackdrop.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
     finalRouteBackdrop.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
+    const finalRouteEditor=$('#node-editor');
+    if(finalRouteEditor?.tagName==='DIALOG')finalRouteEditor.addEventListener('click',event=>{if(event.target!==finalRouteEditor)return;event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
     new MutationObserver(syncFinalRouteBackdrop).observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['class','open']});
     syncFinalRouteBackdrop();
   </script>
