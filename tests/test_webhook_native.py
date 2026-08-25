@@ -6,7 +6,7 @@ from core.aggregation import Aggregator
 from core.event import EventContent, EventEnvelope, EventMeta, EventSource
 from core.persistence import SQLitePhase9Store
 from core.relay import DurableRelay
-from connectors.gbrain.connector import normalize_run, path_is_watched
+from connectors.gbrain.connector import is_verified_completed, normalize_run, path_is_watched
 
 
 def event(event_id: str, text: str = "x", dedupe: str | None = None):
@@ -68,6 +68,12 @@ def test_gbrain_connector_normalizes_completed_output():
     assert payload["event"]["type"] == "gbrain.output.ready"
     assert payload["content"]["text"] == "digest"
     assert payload["event"]["dedupe_key"].startswith("gbrain:run-1:")
+
+
+def test_gbrain_connector_accepts_current_verified_output_schema():
+    assert is_verified_completed({"status": "completed", "durable_output_verified": True})
+    assert not is_verified_completed({"status": "completed", "durable_output_verified": False})
+    assert is_verified_completed({"status": "completed", "verification": "passed"})
 
 
 def test_gbrain_connector_path_filter_is_allow_then_deny(monkeypatch):

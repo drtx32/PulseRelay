@@ -272,6 +272,16 @@ def normalize_run(run: dict[str, Any], text: str) -> dict[str, Any]:
     }
 
 
+def is_verified_completed(run: dict[str, Any]) -> bool:
+    """Accept both legacy verification and the current GBrain run schema."""
+    if str(run.get("status", "")).lower() != "completed":
+        return False
+    verification = str(run.get("verification") or run.get("verification_status") or "").lower()
+    if verification in {"passed", "pass", "true", "verified"}:
+        return True
+    return run.get("durable_output_verified") is True
+
+
 def publish(event: dict[str, Any]) -> None:
     request = Request(INGEST_URL, data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
                       headers={"Content-Type": "application/json"}, method="POST")
@@ -296,7 +306,7 @@ def poll_once(client: MCPHTTPClient) -> int:
         if cursor and _run_key(indexed_run) <= cursor_key:
             continue
         run = client.get_run_details(indexed_run)
-        if str(run.get("status", "")).lower() != "completed" or str(run.get("verification", "")).lower() != "passed":
+        if not is_verified_completed(run):
             continue
         slug = run.get("output_slug")
         if not slug or not path_is_watched(str(slug)):
