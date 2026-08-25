@@ -388,9 +388,9 @@
     finalRouteBackdrop.className='hidden';
     finalRouteBackdrop.setAttribute('aria-hidden','true');
     const finalRouteBackdropStyle=document.createElement('style');
-    finalRouteBackdropStyle.textContent='#route-modal-backdrop{position:fixed;inset:0;display:block!important;background:rgba(17,17,17,.38);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);z-index:1000;cursor:pointer;pointer-events:auto}#route-modal-backdrop.hidden{display:none!important}#node-editor{z-index:1001!important}';
+    finalRouteBackdropStyle.textContent='#route-modal-backdrop{position:fixed;inset:0;display:block!important;background:rgba(17,17,17,.38);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);z-index:1000;cursor:pointer;pointer-events:auto}#route-modal-backdrop.hidden{display:none!important}#node-editor{z-index:1001!important}dialog.node-editor::backdrop{background:rgba(17,17,17,.38);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}';
     document.head.appendChild(finalRouteBackdropStyle);
-    const syncFinalRouteBackdrop=()=>{const editor=$('#node-editor'),routes=$('#routes-view'),open=!!editor&&!editor.classList.contains('hidden')&&!!routes&&!routes.classList.contains('hidden');finalRouteBackdrop.classList.toggle('hidden',!open);finalRouteBackdrop.setAttribute('aria-hidden',String(!open))};
+    const syncFinalRouteBackdrop=()=>{const editor=$('#node-editor'),routes=$('#routes-view'),nativeDialog=editor?.tagName==='DIALOG',open=!!editor&&!nativeDialog&&!editor.classList.contains('hidden')&&!!routes&&!routes.classList.contains('hidden');finalRouteBackdrop.classList.toggle('hidden',!open);finalRouteBackdrop.setAttribute('aria-hidden',String(!open))};
     const closeFinalRouteEditor=()=>{const editor=$('#node-editor');if(!editor)return;if(editor.tagName==='DIALOG'&&editor.open)editor.close();editor.classList.add('hidden');syncFinalRouteBackdrop()};
     finalRouteBackdrop.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
     finalRouteBackdrop.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
