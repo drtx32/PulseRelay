@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.aggregation import Aggregator
+from core.aggregation import Aggregator, validate_aggregation_policy
 from core.event import EventContent, EventEnvelope, EventMeta, EventSource
 from core.persistence import SQLitePhase9Store
 from core.relay import DurableRelay
@@ -93,3 +93,25 @@ def test_event_dedupe_is_idempotent(tmp_path: Path):
     assert not first_duplicate
     assert second_duplicate and first.id == second.id
     assert store.stats()["events_total"] == 1
+
+
+def test_aggregation_policy_requires_integer_counts_and_one_timeout_for_event_count():
+    assert validate_aggregation_policy({"max_events": 1, "max_wait_seconds": 30})["max_events"] == 1
+    for policy in (
+        {"max_events": 1},
+        {"max_events": 1, "idle_timeout_seconds": 30, "max_wait_seconds": 60},
+        {"max_events": 1.5, "max_wait_seconds": 30},
+        {"max_chars": 100.5},
+        {"max_chars": -1},
+    ):
+        try:
+            validate_aggregation_policy(policy)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid aggregation policy accepted: {policy}")
+
+
+def test_aggregation_policy_allows_zero_as_unlimited():
+    assert validate_aggregation_policy({"max_events": 0, "max_chars": 0,
+                                        "idle_timeout_seconds": 0,
+                                        "max_wait_seconds": 0})["max_events"] == 0

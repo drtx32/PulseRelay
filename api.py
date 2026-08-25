@@ -29,6 +29,7 @@ from core.relay import DurableRelay
 from core.connector_index import get_connector_index
 from core.webhook_delivery import WebhookDelivery
 from core.event_bus import EventBus
+from core.aggregation import validate_aggregation_policy
 
 
 def _hash_secret(secret: str) -> str:
@@ -571,6 +572,11 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         aggregation = payload.get("aggregate", payload.get("aggregation"))
         if aggregation is None and source_type:
             aggregation = _connector_aggregation(source_type)
+        try:
+            if aggregation is not None:
+                aggregation = validate_aggregation_policy(aggregation)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         store.upsert_route(payload["id"], payload.get("name", payload["id"]), match, aggregation, payload.get("trigger", {}), payload.get("enabled", True), payload.get("destinations", []))
         if source_type:
             _sync_connector_webhooks(store, source_type)
@@ -702,22 +708,12 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         aggregation = dict(current)
         try:
             if "enabled" in incoming: aggregation["enabled"] = bool(incoming["enabled"])
-            if "max_events" in incoming: aggregation["max_events"] = max(0, min(1000, int(incoming["max_events"])))
-            if "max_chars" in incoming: aggregation["max_chars"] = max(0, min(200000, int(incoming["max_chars"])))
-            if "idle_timeout_seconds" in incoming: aggregation["idle_timeout_seconds"] = max(0.0, min(86400.0, float(incoming["idle_timeout_seconds"])))
-            if "max_wait_seconds" in incoming: aggregation["max_wait_seconds"] = max(0.0, min(86400.0, float(incoming["max_wait_seconds"])))
+            for name in ("max_events", "max_chars", "idle_timeout_seconds", "max_wait_seconds"):
+                if name in incoming: aggregation[name] = incoming[name]
             polling = float(payload.get("polling_interval_seconds", data.get("polling_interval_seconds", data.get("poll_interval_seconds", 60))))
-        except (TypeError, ValueError):
-            raise HTTPException(400, "aggregation and polling values must be numeric")
-        limits = {
-            "max_events": aggregation.get("max_events", 0),
-            "max_chars": aggregation.get("max_chars", 0),
-            "idle_timeout_seconds": aggregation.get("idle_timeout_seconds", 0),
-            "max_wait_seconds": aggregation.get("max_wait_seconds", 0),
-        }
-        active_limits = [name for name, value in limits.items() if float(value or 0) > 0]
-        if len(active_limits) > 1:
-            raise HTTPException(400, "最多消息数、最多字符数、最大消息间隔、最长等待最多只能有一个大于 0")
+            aggregation = validate_aggregation_policy(aggregation)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
         if polling < 5:
             raise HTTPException(400, "polling_interval_seconds must be at least 5 seconds")
         idle = aggregation.get("idle_timeout_seconds")

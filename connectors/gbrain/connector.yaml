@@ -22,7 +22,7 @@ aggregation:
   max_events: 1
   max_chars: 0
   idle_timeout_seconds: 0.0
-  max_wait_seconds: 0.0
+  max_wait_seconds: 300.0
 env:
   GBRAIN_MCP_URL: ${GBRAIN_MCP_URL}
   GBRAIN_MCP_TOKEN: ${GBRAIN_MCP_TOKEN}
