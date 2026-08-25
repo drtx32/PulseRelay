@@ -95,11 +95,13 @@ def test_event_dedupe_is_idempotent(tmp_path: Path):
     assert store.stats()["events_total"] == 1
 
 
-def test_aggregation_policy_requires_integer_counts_and_one_timeout_for_event_count():
-    assert validate_aggregation_policy({"max_events": 1, "max_wait_seconds": 30})["max_events"] == 1
+def test_aggregation_policy_requires_integer_counts_and_timeout_for_multiple_events():
+    assert validate_aggregation_policy({"max_events": 1})["max_events"] == 1
+    assert validate_aggregation_policy({"max_events": 2, "max_wait_seconds": 30,
+                                        "max_chars": 500})["max_events"] == 2
     for policy in (
-        {"max_events": 1},
-        {"max_events": 1, "idle_timeout_seconds": 30, "max_wait_seconds": 60},
+        {"max_events": 0},
+        {"max_events": 2},
         {"max_events": 1.5, "max_wait_seconds": 30},
         {"max_chars": 100.5},
         {"max_chars": -1},
@@ -109,9 +111,3 @@ def test_aggregation_policy_requires_integer_counts_and_one_timeout_for_event_co
         except ValueError:
             continue
         raise AssertionError(f"invalid aggregation policy accepted: {policy}")
-
-
-def test_aggregation_policy_allows_zero_as_unlimited():
-    assert validate_aggregation_policy({"max_events": 0, "max_chars": 0,
-                                        "idle_timeout_seconds": 0,
-                                        "max_wait_seconds": 0})["max_events"] == 0

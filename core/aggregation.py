@@ -18,12 +18,7 @@ MAX_TIMEOUT_SECONDS = 86_400.0
 
 
 def validate_aggregation_policy(policy: dict | None) -> dict:
-    """Validate and normalize the four mutually exclusive aggregation limits.
-
-    Zero means "unlimited".  Positive values are the only active limits;
-    message and character thresholds must be whole numbers.  A message-count
-    policy also needs exactly one time boundary so a batch cannot wait forever.
-    """
+    """Validate and normalize the connector aggregation settings."""
     if policy is None:
         return {}
     if not isinstance(policy, dict):
@@ -37,8 +32,9 @@ def validate_aggregation_policy(policy: dict | None) -> dict:
             parsed = float(value)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must be a number") from exc
-        if not math.isfinite(parsed) or parsed < 0:
-            raise ValueError(f"{name} must be greater than or equal to 0")
+        minimum = 1 if name == "max_events" else 0
+        if not math.isfinite(parsed) or parsed < minimum:
+            raise ValueError(f"{name} must be greater than or equal to {minimum}")
         if parsed > maximum:
             raise ValueError(f"{name} must be at most {maximum:g}")
         if integer and not parsed.is_integer():
@@ -51,21 +47,9 @@ def validate_aggregation_policy(policy: dict | None) -> dict:
     normalized["idle_timeout_seconds"] = number("idle_timeout_seconds", maximum=MAX_TIMEOUT_SECONDS)
     normalized["max_wait_seconds"] = number("max_wait_seconds", maximum=MAX_TIMEOUT_SECONDS)
 
-    limits = {name: normalized[name] for name in (
-        "max_events", "max_chars", "idle_timeout_seconds", "max_wait_seconds")}
-    if normalized.get("enabled", True) is False:
-        return normalized
-    if normalized["max_events"] >= 1:
-        time_limits = [normalized["idle_timeout_seconds"] > 0,
-                       normalized["max_wait_seconds"] > 0]
-        if normalized["max_chars"] > 0:
-            raise ValueError("消息数大于等于 1 时不能同时设置最多字符数")
-        if sum(time_limits) != 1:
-            raise ValueError("消息数大于等于 1 时，最大消息间隔和最长等待必须有且只有一个大于 0")
-    elif normalized["max_chars"] > 0 and (normalized["idle_timeout_seconds"] > 0 or normalized["max_wait_seconds"] > 0):
-        raise ValueError("最多字符数不能同时设置最大消息间隔或最长等待")
-    elif normalized["idle_timeout_seconds"] > 0 and normalized["max_wait_seconds"] > 0:
-        raise ValueError("最大消息间隔和最长等待最多只能有一个大于 0")
+    if normalized.get("enabled", True) is not False and normalized["max_events"] > 1:
+        if normalized["idle_timeout_seconds"] <= 0 and normalized["max_wait_seconds"] <= 0:
+            raise ValueError("消息数大于 1 时，最大消息间隔和最长等待至少一个必须大于 0")
     return normalized
 
 
