@@ -57,6 +57,37 @@ def test_aggregated_delivery_exposes_all_event_text_and_route_template(tmp_path:
     assert captured["aggregation"]["message_template"] == '{"joined":"${input content}"}'
 
 
+def test_sms_aggregation_keeps_header_and_blank_line_between_messages(tmp_path: Path, monkeypatch):
+    store = SQLitePhase9Store(tmp_path / "sms-aggregate-template.db")
+    store.upsert_destination("one", "One", "https://example.test/one")
+    store.upsert_route("r", "SMS", {"source.type": "sms_forwarder"},
+                       {"enabled": True, "max_events": 2, "max_wait_seconds": 60}, destinations=["one"])
+    relay = DurableRelay(store)
+
+    def sms_event(event_id, text, received_at):
+        return EventEnvelope(id=event_id, source=EventSource(type="sms_forwarder", id="sms"),
+                             event=EventMeta(type="message.created", dedupe_key=event_id,
+                                             timestamp=received_at),
+                             content=EventContent(text=text, raw={"sender": "com.tencent.mm", "time": received_at}))
+
+    relay.ingest(sms_event("s1", "444", "2026-08-25T11:03:56+00:00"))
+    relay.ingest(sms_event("s2", "333", "2026-08-25T11:03:57+00:00"))
+    captured = {}
+
+    async def fake_send(self, subject, subject_id, delivery_id, aggregation=None):
+        captured["text"] = subject["content"]["text"]
+        return type("Result", (), {"status": "success", "http_status": 200, "request_excerpt": "",
+                                    "response_excerpt": "", "external_id": "", "emitted_event": None})()
+
+    monkeypatch.setattr(WebhookDelivery, "send", fake_send)
+    import asyncio
+    asyncio.run(relay.process_one())
+    assert captured["text"] == (
+        "SmsForwarder 消息\n来源：com.tencent.mm\n时间：2026-08-25 19:03:56\n\n444\n\n"
+        "SmsForwarder 消息\n来源：com.tencent.mm\n时间：2026-08-25 19:03:57\n\n333"
+    )
+
+
 def test_disabled_aggregation_delivers_each_event_immediately(tmp_path: Path):
     store = SQLitePhase9Store(tmp_path / "disabled-aggregation.db")
     store.upsert_destination("one", "One", "https://example.test/one")

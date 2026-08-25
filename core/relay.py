@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from core.aggregation import Aggregator
 from core.event import EventEnvelope, ensure_event
@@ -11,6 +12,27 @@ from core.persistence import SQLitePhase9Store
 from core.routing import matching_routes
 from core.webhook_delivery import WebhookDelivery, WebhookResult, stable_idempotency_key
 from core.event_bus import EventBus
+
+
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _sms_display_text(event: EventEnvelope) -> str:
+    """Keep SmsForwarder's human-readable header in the shared route layer."""
+    text = str(event.content.text or "")
+    if event.source.type != "sms_forwarder" or text.startswith("SmsForwarder 消息"):
+        return text
+    raw = event.content.raw or {}
+    sender = str((event.sender.name or raw.get("sender") or "unknown"))
+    timestamp = raw.get("received_at") or raw.get("time") or event.event.timestamp
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        received_at = parsed.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OverflowError):
+        received_at = str(timestamp or "")
+    return f"SmsForwarder 消息\n来源：{sender}\n时间：{received_at}\n\n{text}"
 
 
 class DurableRelay:
@@ -70,7 +92,7 @@ class DurableRelay:
                 aggregation_policy = route.aggregation if route else None
                 subject = {"batch_id": delivery.batch_id, "events": [event.to_dict() for event in events],
                            "event_count": len(events),
-                           "content": {"text": "\n".join(event.content.text for event in events)}}
+                           "content": {"text": "\n\n".join(_sms_display_text(event) for event in events)}}
             else:
                 payload = self.store.get_event_payload(delivery.event_id)
                 subject = ensure_event(payload).to_dict()
