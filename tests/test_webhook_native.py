@@ -83,8 +83,7 @@ def test_sms_aggregation_keeps_header_and_blank_line_between_messages(tmp_path: 
     import asyncio
     asyncio.run(relay.process_one())
     assert captured["text"] == (
-        "SmsForwarder 消息\n来源：com.tencent.mm\n时间：2026-08-25 19:03:56\n\n444\n\n"
-        "SmsForwarder 消息\n来源：com.tencent.mm\n时间：2026-08-25 19:03:57\n\n333"
+        "SmsForwarder 消息\n来源：com.tencent.mm\n时间：2026-08-25 19:03:57\n\n444\n\n333"
     )
 
 

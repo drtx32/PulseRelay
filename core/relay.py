@@ -17,11 +17,13 @@ from core.event_bus import EventBus
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
-def _sms_display_text(event: EventEnvelope) -> str:
-    """Keep SmsForwarder's human-readable header in the shared route layer."""
+def _sms_metadata(event: EventEnvelope) -> tuple[str, str]:
     text = str(event.content.text or "")
-    if event.source.type != "sms_forwarder" or text.startswith("SmsForwarder 消息"):
-        return text
+    if text.startswith("SmsForwarder 消息"):
+        lines = text.splitlines()
+        sender = next((line.removeprefix("来源：") for line in lines if line.startswith("来源：")), "unknown")
+        received_at = next((line.removeprefix("时间：") for line in lines if line.startswith("时间：")), "")
+        return sender, received_at
     raw = event.content.raw or {}
     sender = str((event.sender.name or raw.get("sender") or "unknown"))
     timestamp = raw.get("received_at") or raw.get("time") or event.event.timestamp
@@ -32,7 +34,23 @@ def _sms_display_text(event: EventEnvelope) -> str:
         received_at = parsed.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OverflowError):
         received_at = str(timestamp or "")
-    return f"SmsForwarder 消息\n来源：{sender}\n时间：{received_at}\n\n{text}"
+    return sender, received_at
+
+
+def _sms_body_text(event: EventEnvelope) -> str:
+    text = str(event.content.text or "")
+    if text.startswith("SmsForwarder 消息"):
+        return text.partition("\n\n")[2]
+    return text
+
+
+def _aggregated_content_text(events: list[EventEnvelope]) -> str:
+    sms_events = [event for event in events if event.source.type == "sms_forwarder"]
+    if not sms_events:
+        return "\n\n".join(str(event.content.text or "") for event in events)
+    sender, received_at = _sms_metadata(sms_events[-1])
+    header = f"SmsForwarder 消息\n来源：{sender}\n时间：{received_at}"
+    return header + "\n\n" + "\n\n".join(_sms_body_text(event) for event in events)
 
 
 class DurableRelay:
@@ -92,7 +110,7 @@ class DurableRelay:
                 aggregation_policy = route.aggregation if route else None
                 subject = {"batch_id": delivery.batch_id, "events": [event.to_dict() for event in events],
                            "event_count": len(events),
-                           "content": {"text": "\n\n".join(_sms_display_text(event) for event in events)}}
+                           "content": {"text": _aggregated_content_text(events)}}
             else:
                 payload = self.store.get_event_payload(delivery.event_id)
                 subject = ensure_event(payload).to_dict()
