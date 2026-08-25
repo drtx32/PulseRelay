@@ -71,15 +71,20 @@ class WebhookDelivery:
         self.destination = destination
         self.allow_private = allow_private
 
-    async def send(self, subject: dict[str, Any], subject_id: str, delivery_id: str) -> WebhookResult:
+    async def send(self, subject: dict[str, Any], subject_id: str, delivery_id: str,
+                   aggregation: dict[str, Any] | None = None) -> WebhookResult:
         if not self.destination.enabled: return WebhookResult("skipped")
         url = _resolve(self.destination.url)
         if not url.startswith(("http://", "https://")) or (not self.allow_private and _private_host(url)):
             return WebhookResult("failed", error="destination URL rejected")
         config = self.destination.config or {}
         headers = {str(k): str(_resolve(v)) for k, v in (config.get("headers") or {}).items()}
-        message_type = str(config.get("message_type", "json")).lower()
-        template = str(config.get("message_template", ""))
+        # A Route may override the destination presentation for aggregated
+        # batches.  Single-event deliveries continue to use the Webhook's
+        # own template; the two concerns must not be coupled.
+        presentation = aggregation if isinstance(aggregation, dict) else config
+        message_type = str(presentation.get("message_type", config.get("message_type", "json"))).lower()
+        template = str(presentation.get("message_template", config.get("message_template", "")))
         if message_type == "text":
             if template:
                 content = _template_content(subject)

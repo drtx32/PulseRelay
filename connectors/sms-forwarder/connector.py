@@ -19,6 +19,7 @@ WEIXIN_URL = os.environ.get("WEIXIN_WORK_WEBHOOK_URL", "").strip()
 MANIFEST_WEBHOOKS = os.environ.get("PULSERELAY_WEBHOOKS_JSON", "")
 RECONNECT_SECONDS = max(1, int(float(os.environ.get("EVENT_STREAM_RECONNECT_SECONDS", "3"))))
 INITIAL_SYNC_SKIP = os.environ.get("SMS_FORWARDER_INITIAL_SYNC_SKIP", "true").lower() == "true"
+ROUTE_MANAGED = os.environ.get("PULSERELAY_ROUTE_MANAGED", "true").lower() == "true"
 STATE_DIR = Path(os.environ.get("PULSERELAY_STATE_DIR", ".state"))
 STATE_FILE = STATE_DIR / "checkpoint.json"
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -136,10 +137,12 @@ def main() -> None:
                 event_id = str(event.get("id") or "")
                 if not event_id or event_id in seen:
                     continue
-                publish(event)
+                if not ROUTE_MANAGED:
+                    publish(event)
                 seen.add(event_id)
                 save_seen(seen)
-                print(f"Published SmsForwarder event {event_id}", flush=True)
+                action = "handed to PulseRelay routes" if ROUTE_MANAGED else "published directly"
+                print(f"SmsForwarder event {event_id} {action}", flush=True)
         except (ConnectionClosed, OSError, TimeoutError, ValueError, RuntimeError) as exc:
             print(f"event stream disconnected: {type(exc).__name__}: {exc}; retrying", flush=True)
             time.sleep(RECONNECT_SECONDS)

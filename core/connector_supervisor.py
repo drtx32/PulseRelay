@@ -127,6 +127,7 @@ class ConnectorSupervisor:
         environment.update({"PULSERELAY_WATCH_PATHS_JSON": json.dumps(spec.watch_paths),
                             "PULSERELAY_IGNORE_PATHS_JSON": json.dumps(spec.ignore_paths),
                             "PULSERELAY_WEBHOOKS_JSON": json.dumps(spec.webhooks, ensure_ascii=False),
+                            "PULSERELAY_ROUTE_MANAGED": "true",
                             "POLL_INTERVAL_SECONDS": str(spec.polling_interval_seconds)})
         environment.update({"PULSERELAY_CONNECTOR_ID": spec.id, "PULSERELAY_API_URL": self.api_url,
             "PULSERELAY_INGEST_URL": f"{self.api_url}/v1/events", "PULSERELAY_STATE_DIR": str(state_dir),

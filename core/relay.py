@@ -63,13 +63,19 @@ class DurableRelay:
             result = WebhookResult("failed", error="destination not found")
         else:
             subject_id = delivery.batch_id or delivery.event_id or delivery.id
+            aggregation_policy = None
             if delivery.batch_id:
                 events = self.store.batch_events(delivery.batch_id)
-                subject = {"batch_id": delivery.batch_id, "events": [event.to_dict() for event in events], "event_count": len(events)}
+                route = next((item for item in self.store.list_routes() if item.id == self.store.get_batch(delivery.batch_id).route_id), None)
+                aggregation_policy = route.aggregation if route else None
+                subject = {"batch_id": delivery.batch_id, "events": [event.to_dict() for event in events],
+                           "event_count": len(events),
+                           "content": {"text": "\n".join(event.content.text for event in events)}}
             else:
                 payload = self.store.get_event_payload(delivery.event_id)
                 subject = ensure_event(payload).to_dict()
-            result = await WebhookDelivery(destination, allow_private=destination.config.get("allow_private", False)).send(subject, subject_id, delivery.id)
+            result = await WebhookDelivery(destination, allow_private=destination.config.get("allow_private", False)).send(
+                subject, subject_id, delivery.id, aggregation=aggregation_policy)
         if result.status == "success":
             self.store.update_delivery(delivery.id, "success", http_status=result.http_status, request_excerpt=result.request_excerpt, response_excerpt=result.response_excerpt, external_id=result.external_id)
             if result.emitted_event:

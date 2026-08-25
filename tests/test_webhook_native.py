@@ -7,6 +7,7 @@ from core.event import EventContent, EventEnvelope, EventMeta, EventSource
 from core.persistence import SQLitePhase9Store
 from core.relay import DurableRelay
 from connectors.gbrain.connector import is_verified_completed, normalize_run, path_is_watched
+from core.webhook_delivery import WebhookDelivery
 
 
 def event(event_id: str, text: str = "x", dedupe: str | None = None):
@@ -29,6 +30,31 @@ def test_durable_fanout_and_route_scoped_batch(tmp_path: Path):
     deliveries = store.list_deliveries()
     assert len(deliveries) == 2
     assert {item.destination_id for item in deliveries} == {"one", "two"}
+
+
+def test_aggregated_delivery_exposes_all_event_text_and_route_template(tmp_path: Path, monkeypatch):
+    store = SQLitePhase9Store(tmp_path / "aggregate-template.db")
+    store.upsert_destination("one", "One", "https://example.test/one",
+                             config={"message_type": "json", "message_template": '{"text":"${input content}"}'})
+    store.upsert_route("r", "Research", {"source.type": "wechat"},
+                       {"enabled": True, "max_events": 3, "max_wait_seconds": 60,
+                        "message_type": "json", "message_template": '{"joined":"${input content}"}'},
+                       destinations=["one"])
+    relay = DurableRelay(store)
+    for item in (event("e1", "444"), event("e2", "333"), event("e3", "222")):
+        relay.ingest(item)
+    captured = {}
+
+    async def fake_send(self, subject, subject_id, delivery_id, aggregation=None):
+        captured.update(subject=subject, aggregation=aggregation)
+        return type("Result", (), {"status": "success", "http_status": 200, "request_excerpt": "",
+                                    "response_excerpt": "", "external_id": "", "emitted_event": None})()
+
+    monkeypatch.setattr(WebhookDelivery, "send", fake_send)
+    import asyncio
+    asyncio.run(relay.process_one())
+    assert captured["subject"]["content"]["text"] == "444\n333\n222"
+    assert captured["aggregation"]["message_template"] == '{"joined":"${input content}"}'
 
 
 def test_disabled_aggregation_delivers_each_event_immediately(tmp_path: Path):
