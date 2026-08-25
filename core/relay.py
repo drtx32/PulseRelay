@@ -28,12 +28,22 @@ def _sms_metadata(event: EventEnvelope) -> tuple[str, str]:
     sender = str((event.sender.name or raw.get("sender") or "unknown"))
     timestamp = raw.get("received_at") or raw.get("time") or event.event.timestamp
     try:
-        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+        raw_timestamp = str(timestamp or "").strip()
+        numeric_timestamp = float(raw_timestamp)
+        # SmsForwarder sends Unix time in milliseconds.
+        parsed = datetime.fromtimestamp(
+            numeric_timestamp / 1000 if abs(numeric_timestamp) >= 10**11 else numeric_timestamp,
+            tz=timezone.utc,
+        )
         received_at = parsed.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OverflowError):
-        received_at = str(timestamp or "")
+        try:
+            parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            received_at = parsed.astimezone(CHINA_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OverflowError):
+            received_at = str(timestamp or "")
     return sender, received_at
 
 

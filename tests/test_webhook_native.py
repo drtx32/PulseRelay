@@ -87,6 +87,28 @@ def test_sms_aggregation_keeps_header_and_blank_line_between_messages(tmp_path: 
     )
 
 
+def test_sms_aggregation_formats_millisecond_timestamp(tmp_path: Path, monkeypatch):
+    store = SQLitePhase9Store(tmp_path / "sms-aggregate-timestamp.db")
+    store.upsert_destination("one", "One", "https://example.test/one")
+    store.upsert_route("r", "SMS", {"source.type": "sms_forwarder"},
+                       {"enabled": True, "max_events": 1, "max_wait_seconds": 60}, destinations=["one"])
+    relay = DurableRelay(store)
+    relay.ingest(EventEnvelope(id="s1", source=EventSource(type="sms_forwarder", id="sms"),
+                               event=EventMeta(type="message.created", dedupe_key="s1"),
+                               content=EventContent(text="999", raw={"sender": "com.tencent.mm", "time": "1787657092188"})))
+    captured = {}
+
+    async def fake_send(self, subject, subject_id, delivery_id, aggregation=None):
+        captured["text"] = subject["content"]["text"]
+        return type("Result", (), {"status": "success", "http_status": 200, "request_excerpt": "",
+                                    "response_excerpt": "", "external_id": "", "emitted_event": None})()
+
+    monkeypatch.setattr(WebhookDelivery, "send", fake_send)
+    import asyncio
+    asyncio.run(relay.process_one())
+    assert "时间：2026-08-25 19:24:52" in captured["text"]
+
+
 def test_disabled_aggregation_delivers_each_event_immediately(tmp_path: Path):
     store = SQLitePhase9Store(tmp_path / "disabled-aggregation.db")
     store.upsert_destination("one", "One", "https://example.test/one")
