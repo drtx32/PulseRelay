@@ -378,5 +378,23 @@
     function syncAggregationDisabled(prefix){const toggle=$('#'+prefix+'-aggregation-enabled');if(!toggle)return;['max-events','max-chars','idle-timeout','max-wait'].forEach(name=>{const field=$('#'+prefix+'-'+name);if(field)field.disabled=!toggle.checked})}
     const routeEditorFinal=openNodeEditor;openNodeEditor=function(id,kind,data){routeEditorFinal(id,kind,data);if(kind==='inbound')syncAggregationDisabled('route')};
     document.addEventListener('change',event=>{if(event.target?.id==='route-aggregation-enabled')syncAggregationDisabled('route');if(event.target?.id==='connector-aggregation-enabled')syncAggregationDisabled('connector')},true);
+    /* Keep the Routes editor on the same global backdrop as the other modals.
+       The legacy route-only backdrop was mounted inside #routes-view and then
+       hidden by a later compatibility rule, which made outside clicks land on
+       the canvas instead of closing the editor. */
+    const finalRouteBackdrop=document.querySelector('#route-modal-backdrop')||document.createElement('div');
+    finalRouteBackdrop.id='route-modal-backdrop';
+    document.body.appendChild(finalRouteBackdrop);
+    finalRouteBackdrop.className='hidden';
+    finalRouteBackdrop.setAttribute('aria-hidden','true');
+    const finalRouteBackdropStyle=document.createElement('style');
+    finalRouteBackdropStyle.textContent='#route-modal-backdrop{position:fixed;inset:0;display:block!important;background:rgba(17,17,17,.38);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);z-index:1000;cursor:pointer;pointer-events:auto}#route-modal-backdrop.hidden{display:none!important}#node-editor{z-index:1001!important}';
+    document.head.appendChild(finalRouteBackdropStyle);
+    const syncFinalRouteBackdrop=()=>{const editor=$('#node-editor'),routes=$('#routes-view'),open=!!editor&&!editor.classList.contains('hidden')&&!!routes&&!routes.classList.contains('hidden');finalRouteBackdrop.classList.toggle('hidden',!open);finalRouteBackdrop.setAttribute('aria-hidden',String(!open))};
+    const closeFinalRouteEditor=()=>{const editor=$('#node-editor');if(!editor)return;if(editor.tagName==='DIALOG'&&editor.open)editor.close();editor.classList.add('hidden');syncFinalRouteBackdrop()};
+    finalRouteBackdrop.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
+    finalRouteBackdrop.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();closeFinalRouteEditor()});
+    new MutationObserver(syncFinalRouteBackdrop).observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['class','open']});
+    syncFinalRouteBackdrop();
   </script>
 </body></html>
