@@ -683,6 +683,23 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
                 url = str(webhook["url"])
                 configured.append({"name": str(webhook.get("name") or url), "url": url,
                                    "enabled": bool(webhook.get("enabled", True)), "valid": url in known_urls})
+            # Routes are the delivery source of truth. A bind-mounted manifest
+            # may be read-only to the API container, so always include route
+            # destinations in the connector projection even when the YAML
+            # materialization step could not write back to disk.
+            configured_urls = {entry["url"] for entry in configured}
+            connector_id = str(item.get("id") or "")
+            for route in store.list_routes():
+                route_source = route.match.get("source.type") or str(route.match.get("event.type", "")).split(".", 1)[0]
+                if route_source != connector_id:
+                    continue
+                for destination_id in store.route_destinations(route.id):
+                    destination = store.get_destination(destination_id)
+                    if destination is None or destination.url in configured_urls:
+                        continue
+                    configured.append({"name": destination.name, "url": destination.url,
+                                       "enabled": destination.enabled, "valid": True})
+                    configured_urls.add(destination.url)
             result.append({**item, "webhooks": configured})
         return {"connectors": result}
 

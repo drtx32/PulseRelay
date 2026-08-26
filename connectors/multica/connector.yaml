@@ -1,0 +1,23 @@
+id: multica
+# Enable after setting MULTICA_API_TOKEN and MULTICA_AUTOPILOT_IDS in .env.
+enabled: false
+restart: always
+restart_delay_seconds: 10
+command:
+- python
+- /connectors/multica/connector.py
+polling_interval_seconds: 60
+webhooks: []
+aggregation:
+  enabled: true
+  max_events: 1
+  max_chars: 0
+  idle_timeout_seconds: 0
+  max_wait_seconds: 0
+  message_type: text
+  message_template: '{{ event.content.text }}'
+env:
+  MULTICA_API_URL: ${MULTICA_API_URL}
+  MULTICA_API_TOKEN: ${MULTICA_API_TOKEN}
+  MULTICA_AUTOPILOT_IDS: ${MULTICA_AUTOPILOT_IDS}
+  MULTICA_AUTOPILOT_RUNS_URL: ${MULTICA_AUTOPILOT_RUNS_URL}
