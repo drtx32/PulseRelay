@@ -7,6 +7,8 @@ Outbound.
 """
 from __future__ import annotations
 
+import hmac
+import json
 import os
 from typing import Any
 
@@ -239,14 +241,51 @@ def list_deliveries(limit: int = 50, status: str | None = None) -> dict[str, Any
     return {"ok": True, "deliveries": control.list_deliveries(limit=limit, status=status)}
 
 
-# The returned ASGI application includes /mcp and owns its session-manager
-# lifespan when it is served directly. Running it as a separate service avoids
-# coupling MCP transport lifecycle to the data-plane FastAPI process.
-app = mcp.streamable_http_app(
+class BearerControlPlaneAuth:
+    """Small ASGI bearer gate for the dedicated MCP control-plane service.
+
+    The service intentionally refuses all HTTP requests when no token is
+    configured; a remote configuration surface must never fail open.
+    """
+
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.wrapped(scope, receive, send)
+            return
+        expected = (
+            os.getenv("PULSERELAY_MCP_TOKEN", "").strip()
+            or os.getenv("PULSERELAY_ADMIN_TOKEN", "").strip()
+        )
+        if not expected:
+            await self._reject(send, 503, "PulseRelay MCP authentication is not configured")
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        supplied = headers.get(b"authorization", b"").decode("latin-1")
+        scheme, _, token = supplied.partition(" ")
+        if scheme.lower() != "bearer" or not token or not hmac.compare_digest(token.strip(), expected):
+            await self._reject(send, 401, "authentication required", authenticate=True)
+            return
+        await self.wrapped(scope, receive, send)
+
+    @staticmethod
+    async def _reject(send, status: int, detail: str, authenticate: bool = False):
+        body = json.dumps({"error": detail}).encode("utf-8")
+        headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+        if authenticate:
+            headers.append((b"www-authenticate", b"Bearer"))
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+
+mcp_app = mcp.streamable_http_app(
     streamable_http_path="/mcp",
     json_response=True,
     host=os.getenv("PULSERELAY_MCP_HOST", "127.0.0.1"),
 )
+app = BearerControlPlaneAuth(mcp_app)
 
 
 if __name__ == "__main__":
