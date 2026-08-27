@@ -198,10 +198,34 @@ class MCPHTTPClient:
         return self._post("tools/call", {"name": name, "arguments": arguments})
 
     def list_runs(self, *, after: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        arguments = _json_env("GBRAIN_LIST_RUNS_ARGS_JSON", {"type": "task_run", "sort": "updated_asc", "limit": 100})
-        if after:
-            arguments.setdefault("after", after)
-        return _runs_from_result(self.call_tool(LIST_RUNS_TOOL, arguments))
+        base_arguments = _json_env(
+            "GBRAIN_LIST_RUNS_ARGS_JSON",
+            {"type": "task_run", "sort": "updated_asc", "limit": 100},
+        )
+        # GBrain list_pages supports updated_after, not a structured `after`
+        # cursor. Ascending order lets each page continue from its last row.
+        base_arguments.pop("after", None)
+        base_arguments["sort"] = "updated_asc"
+        try:
+            page_limit = max(1, min(100, int(base_arguments.get("limit", 100))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GBRAIN_LIST_RUNS_ARGS_JSON limit must be an integer") from exc
+        base_arguments["limit"] = page_limit
+
+        updated_after = str((after or {}).get("updated_at") or "")
+        runs: list[dict[str, Any]] = []
+        while True:
+            arguments = dict(base_arguments)
+            if updated_after:
+                arguments["updated_after"] = updated_after
+            page = _runs_from_result(self.call_tool(LIST_RUNS_TOOL, arguments))
+            runs.extend(page)
+            if len(page) < page_limit:
+                return runs
+            next_updated_after = str(page[-1].get("updated_at") or "")
+            if not next_updated_after or next_updated_after == updated_after:
+                raise RuntimeError("GBrain list_pages pagination did not advance updated_at")
+            updated_after = next_updated_after
 
     def get_output(self, slug: str) -> Any:
         arguments = _json_env("GBRAIN_GET_OUTPUT_ARGS_JSON", {})
