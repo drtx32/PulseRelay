@@ -1,8 +1,10 @@
 """PulseRelay MCP authentication and scope engine.
 
 API keys and OAuth access tokens resolve to the same Principal model. Secrets
-are never stored in plaintext. The admin bootstrap token remains a local
-super-user escape hatch, not the normal remote MCP credential mode.
+are never stored in plaintext. The existing Web UI contract is preserved:
+API keys created without an explicit scope are full-control credentials, while
+OAuth accepts the GBrain-style `read`, `write`, and `admin` scope aliases plus
+fine-grained PulseRelay scopes.
 """
 from __future__ import annotations
 
@@ -19,12 +21,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-ALL_SCOPES = {
+FINE_SCOPES = {
     "connectors:read", "connectors:write",
     "routes:read", "routes:write",
     "deliveries:read", "deliveries:replay",
     "events:read", "admin",
 }
+SCOPE_ALIASES = {
+    "read": {"connectors:read", "routes:read", "deliveries:read", "events:read"},
+    "write": {"connectors:read", "connectors:write", "routes:read", "routes:write",
+              "deliveries:read", "deliveries:replay", "events:read"},
+    "admin": {"admin"},
+}
+ALL_SCOPES = FINE_SCOPES | set(SCOPE_ALIASES)
 
 
 @dataclass(frozen=True)
@@ -48,18 +57,27 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def normalize_scopes(scopes: Iterable[str] | str | None) -> list[str]:
-    if scopes is None:
-        return []
-    if isinstance(scopes, str):
+def normalize_scopes(scopes: Iterable[str] | str | None, *, default: Iterable[str] | None = None) -> list[str]:
+    if scopes is None or scopes == "" or scopes == []:
+        values = list(default or [])
+    elif isinstance(scopes, str):
         values = scopes.replace(",", " ").split()
     else:
         values = [str(item).strip() for item in scopes]
-    result = sorted({item for item in values if item})
-    unknown = [item for item in result if item not in ALL_SCOPES]
+    expanded: set[str] = set()
+    unknown: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        if value in SCOPE_ALIASES:
+            expanded.update(SCOPE_ALIASES[value])
+        elif value in FINE_SCOPES:
+            expanded.add(value)
+        else:
+            unknown.append(value)
     if unknown:
-        raise ValueError(f"unknown scopes: {', '.join(unknown)}")
-    return result
+        raise ValueError(f"unknown scopes: {', '.join(sorted(set(unknown)))}")
+    return sorted(expanded)
 
 
 class MCPAuthStore:
@@ -72,38 +90,27 @@ class MCPAuthStore:
         with self._lock:
             self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS mcp_api_keys (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    secret_hash TEXT NOT NULL UNIQUE,
-                    prefix TEXT NOT NULL,
-                    scopes_json TEXT NOT NULL,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    revoked_at TEXT
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, secret_hash TEXT NOT NULL UNIQUE,
+                    prefix TEXT NOT NULL, scopes_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, revoked_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS mcp_oauth_clients (
-                    client_id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    client_secret_hash TEXT NOT NULL,
-                    scopes_json TEXT NOT NULL,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    revoked_at TEXT
+                    client_id TEXT PRIMARY KEY, name TEXT NOT NULL, client_secret_hash TEXT NOT NULL,
+                    scopes_json TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, revoked_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS mcp_oauth_tokens (
-                    token_hash TEXT PRIMARY KEY,
-                    client_id TEXT NOT NULL,
-                    scopes_json TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    revoked_at TEXT
+                    token_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, scopes_json TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_mcp_tokens_client ON mcp_oauth_tokens(client_id);
             """)
             self._conn.commit()
 
-    def create_api_key(self, name: str, scopes: Iterable[str] | str) -> dict:
-        scopes_n = normalize_scopes(scopes)
+    def create_api_key(self, name: str, scopes: Iterable[str] | str | None = None) -> dict:
+        # Existing UI has no API-key scope control. Preserve its semantics by
+        # granting full control unless a caller explicitly supplies scopes.
+        scopes_n = normalize_scopes(scopes, default=["admin"])
         key_id = "key_" + secrets.token_hex(8)
         secret = "prk_" + secrets.token_urlsafe(32)
         now = _now()
@@ -119,16 +126,23 @@ class MCPAuthStore:
         with self._lock:
             rows = self._conn.execute("SELECT id,name,prefix,scopes_json,enabled,created_at,revoked_at FROM mcp_api_keys ORDER BY created_at DESC").fetchall()
         return [{"id": r["id"], "name": r["name"], "prefix": r["prefix"], "scopes": json.loads(r["scopes_json"]),
+                 "status": "active" if r["enabled"] and not r["revoked_at"] else "revoked",
                  "enabled": bool(r["enabled"]), "created_at": r["created_at"], "revoked_at": r["revoked_at"]} for r in rows]
 
-    def revoke_api_key(self, key_id: str) -> bool:
+    def revoke_api_key(self, key_id: str | None = None, *, name: str | None = None) -> bool:
+        if not key_id and not name:
+            return False
+        column, value = ("id", key_id) if key_id else ("name", name)
         with self._lock:
-            cur = self._conn.execute("UPDATE mcp_api_keys SET enabled=0,revoked_at=? WHERE id=? AND enabled=1", (_now(), key_id))
+            cur = self._conn.execute(
+                f"UPDATE mcp_api_keys SET enabled=0,revoked_at=? WHERE {column}=? AND enabled=1",
+                (_now(), value),
+            )
             self._conn.commit()
             return bool(cur.rowcount)
 
-    def create_oauth_client(self, name: str, scopes: Iterable[str] | str) -> dict:
-        scopes_n = normalize_scopes(scopes)
+    def create_oauth_client(self, name: str, scopes: Iterable[str] | str | None = None) -> dict:
+        scopes_n = normalize_scopes(scopes, default=["read"])
         client_id = "prc_" + secrets.token_urlsafe(18)
         client_secret = "prs_" + secrets.token_urlsafe(32)
         now = _now()
@@ -138,12 +152,15 @@ class MCPAuthStore:
                 (client_id, name, _hash(client_secret), json.dumps(scopes_n), now),
             )
             self._conn.commit()
-        return {"client_id": client_id, "client_secret": client_secret, "name": name, "scopes": scopes_n, "created_at": now}
+        return {"client_id": client_id, "client_secret": client_secret, "name": name, "scopes": scopes_n,
+                "grant_types": ["client_credentials"], "token_endpoint_auth_method": "client_secret_basic",
+                "created_at": now}
 
     def list_oauth_clients(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute("SELECT client_id,name,scopes_json,enabled,created_at,revoked_at FROM mcp_oauth_clients ORDER BY created_at DESC").fetchall()
         return [{"client_id": r["client_id"], "name": r["name"], "scopes": json.loads(r["scopes_json"]),
+                 "status": "active" if r["enabled"] and not r["revoked_at"] else "revoked",
                  "enabled": bool(r["enabled"]), "created_at": r["created_at"], "revoked_at": r["revoked_at"]} for r in rows]
 
     def revoke_oauth_client(self, client_id: str) -> bool:
@@ -154,7 +171,8 @@ class MCPAuthStore:
             self._conn.commit()
             return bool(cur.rowcount)
 
-    def issue_client_credentials_token(self, client_id: str, client_secret: str, requested_scopes: Iterable[str] | str | None = None,
+    def issue_client_credentials_token(self, client_id: str, client_secret: str,
+                                       requested_scopes: Iterable[str] | str | None = None,
                                        ttl_seconds: int = 3600) -> dict | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM mcp_oauth_clients WHERE client_id=? AND enabled=1 AND revoked_at IS NULL", (client_id,)).fetchone()
@@ -174,7 +192,8 @@ class MCPAuthStore:
                 (_hash(token), client_id, json.dumps(sorted(requested)), expires.isoformat(), now_dt.isoformat()),
             )
             self._conn.commit()
-        return {"access_token": token, "token_type": "Bearer", "expires_in": ttl_seconds, "scope": " ".join(sorted(requested))}
+        return {"access_token": token, "token_type": "Bearer", "expires_in": ttl_seconds,
+                "scope": " ".join(sorted(requested))}
 
     def authenticate_bearer(self, token: str) -> Principal | None:
         admin = os.getenv("PULSERELAY_ADMIN_TOKEN", "").strip()
