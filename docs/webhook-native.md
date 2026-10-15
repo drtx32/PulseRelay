@@ -41,9 +41,27 @@ Create a hook with `POST /v1/hooks`:
 ```
 
 The response contains a generated secret and the complete URL exactly once:
-`POST /v1/hooks/{endpoint_id}/{secret}`. Only a salted PBKDF2-SHA256 verifier is persisted;
+`/v1/hooks/{endpoint_id}/{secret}`. Only a salted PBKDF2-SHA256 verifier is persisted;
 listing or updating a hook never returns the secret. Rotate it with
 `PUT /v1/hooks/{endpoint_id}` and `{ "rotate_secret": true }`.
+
+The generated inbound URL supports `POST`, `PUT`, `PATCH`, and `DELETE` for JSON
+event submission, and `GET` for challenge verification. These four event methods
+share the same content-type, size, HMAC, normalization, persistence, and response
+behavior. For GET, provide exactly one of these query parameters:
+`challenge`, `echostr`, `validationToken`, or `hub.challenge`. Unrelated query
+parameters (such as provider timestamps or signatures) are ignored. PulseRelay
+validates that the endpoint is enabled and the URL secret is correct, then
+returns the decoded challenge value verbatim as `text/plain; charset=utf-8`
+(HTTP 200). Missing, empty, oversized (>4096 characters), repeated, or
+ambiguous challenge parameters return HTTP 400; an unknown, disabled, or
+incorrect path secret returns HTTP 404. GET verification does not
+create or enqueue an event. This is an echo-challenge flow; providers requiring
+their own cryptographic signature/token verification must perform that check
+separately or use a provider-specific adapter.
+`HEAD` validates the endpoint and returns an empty HTTP 200 for availability
+checks. `OPTIONS` validates the endpoint and returns HTTP 204 with an `Allow`
+header; neither method creates an event. `TRACE` and `CONNECT` are not supported.
 
 Hooks reject disabled/unknown secrets, unsupported content types, oversized
 bodies, and malformed JSON. Duplicate events return `2xx` with the original

@@ -495,12 +495,43 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
             "delivery_id": delivery_id,
         }
 
-    @app.post("/v1/hooks/{endpoint_id}/{secret}")
-    @app.post("/v1/webhooks/{endpoint_id}/{secret}")
-    async def inbound_hook(endpoint_id: str, secret: str, request: Request):
+    def authenticated_inbound_endpoint(endpoint_id: str, secret: str):
         endpoint = store.get_inbound_endpoint(endpoint_id)
         if endpoint is None or not endpoint.enabled or not _valid_secret(secret, endpoint.secret_hash):
             raise HTTPException(404, "hook not found")
+        return endpoint
+
+    @app.get("/v1/hooks/{endpoint_id}/{secret}")
+    async def inbound_hook_challenge(endpoint_id: str, secret: str, request: Request):
+        authenticated_inbound_endpoint(endpoint_id, secret)
+
+        # Common verification names used by webhook providers. Ignore unrelated
+        # query parameters (for example timestamp/signature), but reject an
+        # absent, empty, duplicated, or ambiguous challenge rather than echoing
+        # a value the caller did not identify unambiguously.
+        challenge_names = ("challenge", "echostr", "validationToken", "hub.challenge")
+        supplied = [(name, request.query_params.getlist(name)) for name in challenge_names
+                    if request.query_params.getlist(name)]
+        if len(supplied) != 1 or len(supplied[0][1]) != 1:
+            raise HTTPException(400, "provide exactly one challenge query parameter")
+        challenge = supplied[0][1][0]
+        if not challenge or len(challenge) > 4096:
+            raise HTTPException(400, "challenge must contain 1 to 4096 characters")
+        return Response(content=challenge, media_type="text/plain")
+
+    @app.head("/v1/hooks/{endpoint_id}/{secret}")
+    async def inbound_hook_head(endpoint_id: str, secret: str):
+        authenticated_inbound_endpoint(endpoint_id, secret)
+        return Response(status_code=200)
+
+    @app.options("/v1/hooks/{endpoint_id}/{secret}")
+    async def inbound_hook_options(endpoint_id: str, secret: str):
+        authenticated_inbound_endpoint(endpoint_id, secret)
+        return Response(status_code=204, headers={"Allow": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"})
+
+    @app.api_route("/v1/hooks/{endpoint_id}/{secret}", methods=["POST", "PUT", "PATCH", "DELETE"])
+    async def inbound_hook(endpoint_id: str, secret: str, request: Request):
+        endpoint = authenticated_inbound_endpoint(endpoint_id, secret)
         if not endpoint.secret_hash.startswith("pbkdf2_sha256$"):
             # Seamlessly upgrade pre-Phase-3 SHA-256 verifiers after a valid
             # request; the old weak verifier is not retained for future calls.

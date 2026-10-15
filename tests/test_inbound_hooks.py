@@ -12,9 +12,74 @@ from api import _hash_secret, _render, _valid_secret, create_app
 from core.persistence import SQLitePhase9Store
 
 
+@pytest.fixture(autouse=True)
+def configure_admin_auth(monkeypatch):
+    monkeypatch.setenv("PULSERELAY_ADMIN_TOKEN", "test-admin-token")
+
+
 def make_client(tmp_path):
     store = SQLitePhase9Store(tmp_path / "hooks.db")
-    return TestClient(create_app(store)), store
+    return TestClient(create_app(store), headers={"Authorization": "Bearer test-admin-token"}), store
+
+
+@pytest.mark.parametrize("challenge_name", ["challenge", "echostr", "validationToken", "hub.challenge"])
+def test_get_hook_echoes_supported_challenge_as_plain_text(tmp_path, challenge_name):
+    client, store = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "challenge-hook"}).json()
+
+    response = client.get(created["url"] + f"?{challenge_name}=verify%2Bvalue")
+
+    assert response.status_code == 200
+    assert response.text == "verify+value"
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert store.stats()["events_total"] == 0
+
+
+def test_get_hook_rejects_missing_or_repeated_challenge(tmp_path):
+    client, _ = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "challenge-hook"}).json()
+
+    assert client.get(created["url"]).status_code == 400
+    repeated = client.get(created["url"] + "?challenge=one&challenge=two")
+    assert repeated.status_code == 400
+
+
+def test_get_hook_rejects_wrong_secret_and_disabled_endpoint(tmp_path):
+    client, _ = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "challenge-hook"}).json()
+    endpoint_path = created["url"].rsplit("/", 1)[0]
+
+    assert client.get(endpoint_path + "/wrong-secret?challenge=ok").status_code == 404
+    assert client.put("/v1/hooks/challenge-hook", json={"enabled": False}).status_code == 200
+    assert client.get(created["url"] + "?challenge=ok").status_code == 404
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_entity_http_methods_ingest_json_events(tmp_path, method):
+    client, store = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "method-hook"}).json()
+    payload = {"id": f"event-{method.lower()}", "event": {"type": "method.test"},
+               "content": {"text": f"sent with {method}"}}
+
+    response = client.request(method, created["url"], json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    assert store.stats()["events_total"] == 1
+
+
+def test_head_and_options_probe_hook_without_ingesting_events(tmp_path):
+    client, store = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "method-hook"}).json()
+
+    head = client.head(created["url"])
+    options = client.options(created["url"])
+
+    assert head.status_code == 200
+    assert head.content == b""
+    assert options.status_code == 204
+    assert options.headers["allow"] == "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+    assert store.stats()["events_total"] == 0
 
 
 def test_generated_hook_secret_is_returned_once_and_payload_is_persisted(tmp_path):
