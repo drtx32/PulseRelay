@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "")
 API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
 INGEST_URL = os.environ.get("PULSERELAY_INGEST_URL", "")
+INGEST_TOKEN = os.environ.get("PULSERELAY_INGEST_TOKEN", "").strip() or os.environ.get("PULSERELAY_ADMIN_TOKEN", "").strip()
 TOKEN = os.environ.get("GITHUB_TOKEN", "")
 INTERVAL = max(5, int(os.environ.get("POLL_INTERVAL_SECONDS", "60")))
 INITIAL_SYNC_LIMIT = max(1, int(os.environ.get("INITIAL_SYNC_LIMIT", "1")))
@@ -86,7 +87,10 @@ def normalize_release(release: dict) -> dict:
 
 def publish(event: dict) -> None:
     body = json.dumps(event, ensure_ascii=False).encode("utf-8")
-    request = Request(INGEST_URL, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
+    request = Request(INGEST_URL, data=body, headers=headers, method="POST")
     with urlopen(request, timeout=30) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"PulseRelay rejected event with HTTP {response.status}")

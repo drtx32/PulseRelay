@@ -34,6 +34,7 @@ if not OAUTH_TOKEN_URL and MCP_URL:
 LIST_RUNS_TOOL = os.environ.get("GBRAIN_LIST_RUNS_TOOL", "list_pages")
 GET_OUTPUT_TOOL = os.environ.get("GBRAIN_GET_OUTPUT_TOOL", "get_page")
 INGEST_URL = os.environ.get("PULSERELAY_INGEST_URL", "").strip()
+INGEST_TOKEN = os.environ.get("PULSERELAY_INGEST_TOKEN", "").strip() or os.environ.get("PULSERELAY_ADMIN_TOKEN", "").strip()
 INTERVAL = max(5, int(float(os.environ.get("POLL_INTERVAL_SECONDS", "60"))))
 STATE_DIR = Path(os.environ.get("PULSERELAY_STATE_DIR", ".state"))
 STATE_FILE = STATE_DIR / "checkpoint.json"
@@ -307,8 +308,11 @@ def is_verified_completed(run: dict[str, Any]) -> bool:
 
 
 def publish(event: dict[str, Any]) -> None:
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
     request = Request(INGEST_URL, data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-                      headers={"Content-Type": "application/json"}, method="POST")
+                      headers=headers, method="POST")
     with urlopen(request, timeout=30) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"PulseRelay rejected event with HTTP {response.status}")

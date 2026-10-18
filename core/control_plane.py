@@ -15,6 +15,7 @@ from dataclasses import asdict
 from typing import Any
 
 from core.persistence import SQLitePhase9Store
+from core.redaction import redact_mapping, redact_sensitive_text, redact_url
 
 
 def hash_secret(secret: str) -> str:
@@ -73,21 +74,13 @@ class ControlPlaneService:
     def _public_outbound(record) -> dict[str, Any]:
         # Destination config may contain secret references but must never carry
         # materialized Authorization values through the control plane.
-        config = dict(record.config or {})
-        headers = dict(config.get("headers") or {})
-        for key in list(headers):
-            if key.lower() in {"authorization", "cookie", "proxy-authorization"}:
-                value = str(headers[key])
-                if not (value.startswith("${secret:") or value.startswith("${env:")):
-                    headers[key] = "<redacted>"
-        if headers:
-            config["headers"] = headers
+        config = redact_mapping(dict(record.config or {}))
         return {
             "id": record.id,
             "name": record.name,
             "kind": "webhook_outbound",
             "enabled": record.enabled,
-            "url": record.url,
+            "url": redact_url(record.url),
             "method": record.method,
             "config": config,
         }
@@ -314,4 +307,29 @@ class ControlPlaneService:
 
     def list_deliveries(self, *, limit: int = 50, status: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
-        return [asdict(item) for item in self.store.list_deliveries(limit=limit, status=status)]
+        return [self._public_delivery(item) for item in self.store.list_deliveries(limit=limit, status=status)]
+
+    @staticmethod
+    def _public_delivery(item) -> dict[str, Any]:
+        result = asdict(item)
+        for key in ("request_excerpt", "response_excerpt", "last_error"):
+            result[key] = redact_sensitive_text(str(result.get(key) or ""))
+        return result
+
+    def get_delivery(self, delivery_id: str) -> dict[str, Any]:
+        item = self.store.get_delivery(delivery_id)
+        if item is None:
+            raise ControlPlaneError(f"delivery not found: {delivery_id}")
+        return self._public_delivery(item)
+
+    def list_events(self, *, limit: int = 50, source_type: str | None = None,
+                    event_type: str | None = None, status: str | None = None) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        return [redact_mapping(asdict(item)) for item in self.store.list_events(
+            limit=limit, source_type=source_type, event_type=event_type, status=status)]
+
+    def get_event(self, event_id: str) -> dict[str, Any]:
+        payload = self.store.get_event_payload(event_id)
+        if not payload:
+            raise ControlPlaneError(f"event not found: {event_id}")
+        return redact_mapping(payload)

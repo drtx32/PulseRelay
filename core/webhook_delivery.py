@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import http.client
 import hmac
 import ipaddress
 import json
 import os
 import socket
+import ssl
 import time
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
 from dataclasses import dataclass
 from typing import Any
 from jinja2 import StrictUndefined
@@ -43,11 +44,66 @@ def _resolve(value: Any) -> Any:
 
 
 def _private_host(url: str) -> bool:
-    from urllib.parse import urlparse
-    host = urlparse(url).hostname
-    if not host: return True
-    try: return ipaddress.ip_address(socket.gethostbyname(host)).is_private
-    except OSError: return True
+    try:
+        parts = urlsplit(url)
+        if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+            return True
+        addresses = _resolve_addresses(parts.hostname, parts.port or (443 if parts.scheme == "https" else 80))
+        return not addresses or any(not address.is_global for address in addresses)
+    except (OSError, ValueError):
+        return True
+
+
+def _resolve_addresses(host: str, port: int) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    try:
+        literal = ipaddress.ip_address(host)
+        return [literal]
+    except ValueError:
+        records = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = {ipaddress.ip_address(record[4][0].split("%", 1)[0]) for record in records}
+        if not addresses:
+            raise OSError("destination host did not resolve")
+        return sorted(addresses, key=lambda value: (value.version, int(value)))
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, address: str, port: int, server_hostname: str, timeout: float):
+        super().__init__(address, port, timeout=timeout, context=ssl.create_default_context())
+        self._server_hostname = server_hostname
+
+    def connect(self):
+        sock = socket.create_connection((self.host, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self._server_hostname)
+
+
+def _safe_http_request(url: str, method: str, headers: dict[str, str], body: bytes,
+                       timeout: float, allow_private: bool = False):
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
+        raise ValueError("destination URL rejected")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    addresses = _resolve_addresses(parts.hostname, port)
+    if not allow_private and any(not address.is_global for address in addresses):
+        raise ValueError("destination URL rejected")
+    address = str(addresses[0])
+    host_header = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    if parts.port:
+        host_header = f"{host_header}:{parts.port}"
+    request_headers = dict(headers)
+    request_headers.setdefault("Host", host_header)
+    connection = (
+        _PinnedHTTPSConnection(address, port, parts.hostname, timeout)
+        if parts.scheme == "https" else http.client.HTTPConnection(address, port, timeout=timeout)
+    )
+    try:
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        connection.request(method, path, body=body, headers=request_headers)
+        response = connection.getresponse()
+        return response.status, response.read(2000).decode("utf-8", errors="replace"), response.getheader("Retry-After")
+    finally:
+        connection.close()
 
 
 def _template_content(subject: dict[str, Any]) -> Any:
@@ -125,22 +181,32 @@ class WebhookDelivery:
         signing_secret = _resolve(config.get("hmac_secret"))
         if signing_secret:
             headers["X-PulseRelay-Signature"] = hmac.new(str(signing_secret).encode(), body, hashlib.sha256).hexdigest()
-        request = urllib.request.Request(url, data=body, headers=headers, method=self.destination.method)
         timeout = float(config.get("timeout_seconds", 30))
         try:
-            response = await asyncio.to_thread(urllib.request.urlopen, request, timeout=timeout)
-            text = response.read(2000).decode("utf-8", errors="replace")
+            status_code, text, retry_after_header = await asyncio.to_thread(
+                _safe_http_request, url, self.destination.method, headers, body, timeout, self.allow_private
+            )
             emitted = None
             try:
                 parsed = json.loads(text) if text else {}
                 emitted = parsed.get("emit") if isinstance(parsed, dict) else None
             except json.JSONDecodeError: pass
-            return WebhookResult("success" if response.status in set(config.get("success_statuses", [200, 201, 202, 204])) else "failed", response.status, response_excerpt=text, emitted_event=emitted, request_excerpt=body.decode("utf-8", errors="replace"))
-        except urllib.error.HTTPError as exc:
-            text = exc.read(2000).decode("utf-8", errors="replace")
             retry_after = None
-            try: retry_after = float(exc.headers.get("Retry-After"))
+            try: retry_after = float(retry_after_header)
             except (TypeError, ValueError): pass
-            return WebhookResult("failed", exc.code, response_excerpt=text, error=f"HTTP {exc.code}", retry_after=retry_after, request_excerpt=body.decode("utf-8", errors="replace"))
+            if 300 <= status_code < 400:
+                return WebhookResult("failed", status_code, error="redirect rejected", response_excerpt=text,
+                                     request_excerpt=body.decode("utf-8", errors="replace"))
+            return WebhookResult("success" if status_code in set(config.get("success_statuses", [200, 201, 202, 204])) else "failed", status_code, response_excerpt=text, emitted_event=emitted, retry_after=retry_after, request_excerpt=body.decode("utf-8", errors="replace"))
         except Exception as exc:
-            return WebhookResult("failed", error=str(exc), request_excerpt=body.decode("utf-8", errors="replace"))
+            status_code = getattr(exc, "code", None)
+            text = ""
+            if isinstance(exc, http.client.HTTPException):
+                text = str(exc)
+            elif isinstance(exc, OSError) and getattr(exc, "status", None):
+                status_code = exc.status
+            if status_code and 300 <= status_code < 400:
+                return WebhookResult("failed", status_code, error="redirect rejected", response_excerpt=text,
+                                     request_excerpt=body.decode("utf-8", errors="replace"))
+            return WebhookResult("failed", http_status=status_code, error="destination request failed",
+                                 response_excerpt=text, request_excerpt=body.decode("utf-8", errors="replace"))

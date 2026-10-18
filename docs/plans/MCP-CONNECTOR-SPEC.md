@@ -371,6 +371,38 @@ Mandatory:
 - audit who changed which route/endpoint through MCP/API/UI;
 - disabling a connector/route is a hard gate.
 
+### 11.1 Remote principal permissions (2026-10-18)
+
+The control plane is read-only for ordinary remote agents. A separately
+authorized principal may manage connectors and route configuration. OAuth and
+Bearer API keys are authentication transports; they do not themselves grant
+permission. MCP tools and HTTP control APIs resolve credentials to the same
+principal and enforce scopes on every invocation. Filtering the advertised
+tool list is only a usability feature, never an authorization boundary.
+
+- Unscoped API keys and OAuth clients default to `read`.
+- `read` grants connector, route, delivery, event and health inspection, plus
+  pure route validation.
+- `write` adds connector and route create/update/enable/disable. It does not
+  grant event ingestion, deletion, secret rotation, delivery replay, live
+  outbound tests or manual delivery processing.
+- `admin` grants ordinary control-plane writes. Sensitive operations still
+  require their explicit scopes, including `connectors:delete`,
+  `connectors:rotate_secret`, `routes:delete`, `deliveries:replay`,
+  `webhooks:test`, `webhooks:private_network` and `deliveries:process`. `events:write` is a separate
+  data-plane scope for connector ingestion; a least-privilege ingest token can
+  receive it without configuration-write scopes. `admin` also grants this
+  non-sensitive ingestion permission.
+- Missing/invalid credentials are rejected; authenticated principals without
+  the required scope are forbidden. Both OAuth access tokens and API-key
+  Bearer tokens follow the same checks.
+
+List/get responses, event streams and persisted delivery diagnostics must
+redact credential values and secret-bearing webhook URL portions. Newly
+generated inbound credentials may be returned only at creation or explicit
+rotation time. Outbound requests must reject non-global address targets by
+default, connect to a vetted resolved address, and never follow redirects.
+
 ## 12. Explicit non-goals for P0
 
 Do not prioritize:

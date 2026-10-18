@@ -1,3 +1,4 @@
+from connectors.gbrain import connector
 from connectors.gbrain.connector import LIST_RUNS_TOOL, MCPHTTPClient
 
 
@@ -37,6 +38,27 @@ def test_list_runs_uses_updated_after_and_fetches_all_pages(monkeypatch):
             },
         ),
     ]
+
+
+def test_ingest_uses_scoped_bearer_token(monkeypatch):
+    monkeypatch.setattr(connector, "INGEST_URL", "http://relay/v1/events")
+    monkeypatch.setattr(connector, "INGEST_TOKEN", "ingest-token")
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(connector, "urlopen", fake_urlopen)
+    connector.publish({"id": "event-1"})
+    assert captured["request"].get_header("Authorization") == "Bearer ingest-token"
 
 
 def test_list_runs_maps_checkpoint_to_updated_after(monkeypatch):

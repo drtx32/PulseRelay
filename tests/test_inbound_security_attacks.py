@@ -15,8 +15,11 @@ from core.persistence import SQLitePhase9Store
 
 def _client(tmp_path, **hook):
     store = SQLitePhase9Store(tmp_path / "attack.db")
-    client = TestClient(create_app(store))
-    created = client.post("/v1/hooks", json={"id": "attack", **hook})
+    app = create_app(store)
+    client = TestClient(app)
+    key = app.state.mcp_auth_store.create_api_key("test-admin", "admin")
+    created = client.post("/v1/hooks", json={"id": "attack", **hook},
+                          headers={"Authorization": f"Bearer {key['api_key']}"})
     assert created.status_code == 200, created.text
     return client, store, created.json()
 
