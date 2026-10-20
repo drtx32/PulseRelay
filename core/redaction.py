@@ -34,6 +34,33 @@ def redact_url(value: str) -> str:
         return "<redacted-url>"
 
 
+def restore_redacted_values(original, submitted):
+    """Restore redaction markers echoed from a public read into an edit.
+
+    Control-plane clients commonly read an object, change one field, and send
+    the object back. Preserve the stored value wherever the client echoed the
+    exact marker instead of treating ``<redacted>`` as a new secret.
+    """
+    if submitted == "<redacted>":
+        return original
+    if isinstance(original, dict) and isinstance(submitted, dict):
+        return {
+            key: restore_redacted_values(original.get(key), value)
+            for key, value in submitted.items()
+        }
+    if isinstance(original, list) and isinstance(submitted, list):
+        return [
+            restore_redacted_values(original[index] if index < len(original) else None, value)
+            for index, value in enumerate(submitted)
+        ]
+    return submitted
+
+
+def restore_redacted_url(original: str, submitted: str) -> str:
+    """Keep the original URL when a client echoes its redacted projection."""
+    return original if submitted == redact_url(original) else submitted
+
+
 def redact_sensitive_text(value: str) -> str:
     text = _BEARER_RE.sub("Bearer <redacted>", value)
     return _URL_RE.sub(lambda match: redact_url(match.group(0).rstrip(".,);]")), text)

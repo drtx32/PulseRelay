@@ -15,6 +15,7 @@ from mcp.server import MCPServer
 from core.control_plane import ControlPlaneError, ControlPlaneService
 from core.mcp_auth import current_principal, get_auth_store, require_scope
 from core.persistence import SQLitePhase9Store
+from core.redaction import restore_redacted_url, restore_redacted_values
 
 store = SQLitePhase9Store(os.getenv("PULSERELAY_DB_PATH", "data/pulserelay.db"))
 control = ControlPlaneService(store)
@@ -105,9 +106,13 @@ def update_webhook_outbound(connector_id: str, name: str | None = None, url: str
                             method: str | None = None, config: dict[str, Any] | None = None,
                             enabled: bool | None = None) -> dict[str, Any]:
     if denied := _guard("connectors:write"): return denied
-    if config is not None and config.get("allow_private"):
-        current = control.store.get_destination(connector_id)
-        if (current is None or not (current.config or {}).get("allow_private")) and (denied := _guard("webhooks:private_network")):
+    current = control.store.get_destination(connector_id)
+    if current is not None:
+        final_url = current.url if url is None else restore_redacted_url(current.url, url)
+        final_config = current.config if config is None else restore_redacted_values(current.config, config)
+        if final_config.get("allow_private") and (
+            final_url != current.url or not (current.config or {}).get("allow_private")
+        ) and (denied := _guard("webhooks:private_network")):
             return denied
     try: return {"ok": True, "connector": control.update_webhook_outbound(
         connector_id, name=name, url=url, method=method, config=config, enabled=enabled)}

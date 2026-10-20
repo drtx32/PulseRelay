@@ -15,7 +15,13 @@ from dataclasses import asdict
 from typing import Any
 
 from core.persistence import SQLitePhase9Store
-from core.redaction import redact_mapping, redact_sensitive_text, redact_url
+from core.redaction import (
+    redact_mapping,
+    redact_sensitive_text,
+    redact_url,
+    restore_redacted_url,
+    restore_redacted_values,
+)
 
 
 def hash_secret(secret: str) -> str:
@@ -189,15 +195,16 @@ class ControlPlaneService:
         current = self.store.get_destination(connector_id)
         if current is None:
             raise ControlPlaneError(f"outbound connector not found: {connector_id}")
-        next_url = current.url if url is None else url
+        next_url = current.url if url is None else restore_redacted_url(current.url, url)
         if not next_url.startswith(("http://", "https://")):
             raise ControlPlaneError("webhook outbound url must use http or https")
+        next_config = current.config if config is None else restore_redacted_values(current.config, config)
         self.store.upsert_destination(
             connector_id,
             current.name if name is None else name,
             next_url,
             current.method if method is None else method,
-            current.config if config is None else config,
+            next_config,
             current.enabled if enabled is None else enabled,
         )
         return self.get_connector(connector_id)

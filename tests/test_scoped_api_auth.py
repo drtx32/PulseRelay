@@ -69,3 +69,74 @@ def test_oauth_bearer_token_uses_same_scopes_as_api_key(tmp_path):
     headers = {"Authorization": f"Bearer {token['access_token']}"}
     assert client.get("/v1/routes", headers=headers).status_code == 200
     assert client.post("/v1/routes", json={"id": "denied"}, headers=headers).status_code == 403
+
+
+def test_webhook_edit_preserves_redacted_secrets_and_reauthorizes_private_retarget(tmp_path):
+    store = SQLitePhase9Store(tmp_path / "webhook-edit-rbac.db")
+    app = create_app(store)
+    client = TestClient(app)
+    auth = app.state.mcp_auth_store
+    scoped_admin = auth.create_api_key("scoped-admin", "connectors:read connectors:write")
+    private_admin = auth.create_api_key(
+        "private-admin", "connectors:read connectors:write webhooks:private_network"
+    )
+    scoped_headers = {"Authorization": f"Bearer {scoped_admin['api_key']}"}
+    private_headers = {"Authorization": f"Bearer {private_admin['api_key']}"}
+    original_url = "https://receiver.example/hooks/out/0123456789abcdefghijklmnopqrstuv?token=url-secret"
+    original_config = {
+        "allow_private": True,
+        "headers": {"Authorization": "Bearer header-secret"},
+        "hmac_secret": "signing-secret",
+        "message_type": "json",
+    }
+    created = client.post("/v1/webhooks", json={
+        "id": "out", "url": original_url, "config": original_config,
+    }, headers=private_headers)
+    assert created.status_code == 200, created.text
+    public_read = client.get("/v1/webhooks/out", headers=scoped_headers).json()["webhook"]
+    assert "url-secret" not in public_read["url"]
+    assert public_read["config"]["headers"]["Authorization"] == "<redacted>"
+    assert public_read["config"]["hmac_secret"] == "<redacted>"
+
+    # Editing only the name while echoing the public projection must not
+    # replace stored credentials or the secret-bearing URL with markers.
+    public_read["name"] = "renamed"
+    edited = client.put("/v1/webhooks/out", json=public_read, headers=scoped_headers)
+    assert edited.status_code == 200, edited.text
+    saved = store.get_destination("out")
+    assert saved.name == "renamed"
+    assert saved.url == original_url
+    assert saved.config == original_config
+
+    # Existing private-network permission does not transfer to a new target.
+    retargeted = client.put("/v1/webhooks/out", json={
+        "url": "http://127.0.0.1:8088/new-hook",
+        "config": public_read["config"],
+    }, headers=scoped_headers)
+    assert retargeted.status_code == 403
+    assert store.get_destination("out").url == original_url
+    accepted = client.put("/v1/webhooks/out", json={
+        "url": "http://127.0.0.1:8088/new-hook",
+    }, headers=private_headers)
+    assert accepted.status_code == 200, accepted.text
+    assert store.get_destination("out").url == "http://127.0.0.1:8088/new-hook"
+
+
+def test_oauth_scoped_admin_is_forbidden_to_retarget_private_webhook_without_scope(tmp_path):
+    store = SQLitePhase9Store(tmp_path / "oauth-private-retarget.db")
+    app = create_app(store)
+    client = TestClient(app)
+    auth = app.state.mcp_auth_store
+    private_client = auth.create_oauth_client("private-admin", "connectors:read connectors:write webhooks:private_network")
+    private_token = auth.issue_client_credentials_token(private_client["client_id"], private_client["client_secret"])
+    reader_client = auth.create_oauth_client("scoped-admin", "connectors:read connectors:write")
+    reader_token = auth.issue_client_credentials_token(reader_client["client_id"], reader_client["client_secret"])
+    private_headers = {"Authorization": f"Bearer {private_token['access_token']}"}
+    reader_headers = {"Authorization": f"Bearer {reader_token['access_token']}"}
+    assert client.post("/v1/webhooks", json={
+        "id": "oauth-out", "url": "https://receiver.example/hook", "config": {"allow_private": True},
+    }, headers=private_headers).status_code == 200
+    denied = client.put("/v1/webhooks/oauth-out", json={
+        "url": "http://127.0.0.1:8088/new-hook",
+    }, headers=reader_headers)
+    assert denied.status_code == 403

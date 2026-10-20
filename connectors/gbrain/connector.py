@@ -45,9 +45,27 @@ IGNORE_PATHS = json.loads(os.environ.get("PULSERELAY_IGNORE_PATHS_JSON", "[]"))
 def path_is_watched(path: str) -> bool:
     """Match normalized output slugs against connector.yaml path patterns."""
     normalized = path.strip("/")
-    if any(fnmatchcase(normalized, pattern.strip("/")) for pattern in IGNORE_PATHS):
+
+    def matches(pattern: str) -> bool:
+        # fnmatch lets ** cross path separators, but `**/` still requires a
+        # slash. Also try the zero-directory expansion so patterns such as
+        # `notes/private/**/*plan*` match `notes/private/today-plan`.
+        candidates = {pattern.strip("/")}
+        pending = list(candidates)
+        while pending:
+            candidate = pending.pop()
+            marker = candidate.find("**/")
+            while marker >= 0:
+                expanded = candidate[:marker] + candidate[marker + 3:]
+                if expanded not in candidates:
+                    candidates.add(expanded)
+                    pending.append(expanded)
+                marker = candidate.find("**/", marker + 3)
+        return any(fnmatchcase(normalized, candidate) for candidate in candidates)
+
+    if any(matches(pattern) for pattern in IGNORE_PATHS):
         return False
-    return not WATCH_PATHS or any(fnmatchcase(normalized, pattern.strip("/")) for pattern in WATCH_PATHS)
+    return not WATCH_PATHS or any(matches(pattern) for pattern in WATCH_PATHS)
 
 
 def _json_env(name: str, default: dict[str, Any]) -> dict[str, Any]:

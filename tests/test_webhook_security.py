@@ -28,6 +28,47 @@ def test_ssrf_blocks_non_global_addresses(tmp_path, monkeypatch):
     assert not called
 
 
+def test_ssrf_rejects_mixed_dns_answers_and_pins_selected_address(monkeypatch):
+    safe_request = webhook_delivery._safe_http_request
+    destination = DestinationRecord("out", "Outbound", True, "http://rebound.example/hook", "POST", {})
+    monkeypatch.setattr(webhook_delivery, "_resolve_addresses", lambda host, port: [
+        ipaddress.ip_address("93.184.216.34"), ipaddress.ip_address("127.0.0.1")
+    ])
+    sent = False
+
+    def should_not_send(*args, **kwargs):
+        nonlocal sent
+        sent = True
+        raise AssertionError("mixed public/private DNS answers must be rejected")
+
+    monkeypatch.setattr(webhook_delivery, "_safe_http_request", should_not_send)
+    rejected = asyncio.run(WebhookDelivery(destination).send({"content": {"text": "x"}}, "e", "d"))
+    assert rejected.status == "failed"
+    assert rejected.error == "destination URL rejected"
+    assert not sent
+
+    # The validated address is passed directly to the socket layer. A later
+    # DNS answer cannot retarget the connection between validation and connect.
+    calls = []
+
+    def fail_after_capture(address, timeout=None, source_address=None):
+        calls.append(address)
+        raise OSError("test stop before network I/O")
+
+    monkeypatch.setattr(webhook_delivery, "_resolve_addresses", lambda host, port: [
+        ipaddress.ip_address("93.184.216.34")
+    ])
+    monkeypatch.setattr(webhook_delivery, "_safe_http_request", safe_request)
+    monkeypatch.setattr(webhook_delivery.socket, "create_connection", fail_after_capture)
+    try:
+        webhook_delivery._safe_http_request("http://pinned.example/hook", "POST", {}, b"{}", 1.0)
+    except OSError as exc:
+        assert str(exc) == "test stop before network I/O"
+    else:
+        raise AssertionError("expected socket stub to stop before network I/O")
+    assert calls == [("93.184.216.34", 80)]
+
+
 def test_redirect_response_is_not_followed(monkeypatch):
     calls = []
 
@@ -50,6 +91,18 @@ def test_redirect_response_is_not_followed(monkeypatch):
     )
     assert status == 302
     assert calls == [("POST", "/start")]
+
+
+def test_redirect_is_reported_failed_without_following_location(monkeypatch):
+    calls = []
+    monkeypatch.setattr(webhook_delivery, "_safe_http_request", lambda *args, **kwargs: (
+        calls.append(args[0]) or (307, "redirect body", None)
+    ))
+    destination = DestinationRecord("redirect", "Redirect", True, "https://public.example/start", "POST", {})
+    result = asyncio.run(WebhookDelivery(destination, allow_private=True).send({"content": {"text": "x"}}, "e", "d"))
+    assert result.status == "failed"
+    assert result.error == "redirect rejected"
+    assert calls == ["https://public.example/start"]
 
 
 def test_secret_webhook_urls_and_delivery_diagnostics_are_redacted(tmp_path):

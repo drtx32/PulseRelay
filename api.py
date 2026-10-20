@@ -31,7 +31,13 @@ from core.webhook_delivery import WebhookDelivery
 from core.event_bus import EventBus
 from core.aggregation import validate_aggregation_policy
 from core.mcp_auth import get_auth_store
-from core.redaction import redact_mapping, redact_sensitive_text, redact_url
+from core.redaction import (
+    redact_mapping,
+    redact_sensitive_text,
+    redact_url,
+    restore_redacted_url,
+    restore_redacted_values,
+)
 
 
 def _hash_secret(secret: str) -> str:
@@ -670,13 +676,16 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         current = store.get_destination(webhook_id)
         if current is None:
             raise HTTPException(404, "webhook not found")
-        url = str(payload.get("url", current.url)).strip()
+        url = restore_redacted_url(current.url, str(payload.get("url", current.url)).strip())
         if not re.match(r"^https?://", url, re.IGNORECASE):
             raise HTTPException(400, "webhook url must start with http:// or https://")
-        config = payload.get("config", current.config)
+        submitted_config = payload.get("config", current.config)
+        config = restore_redacted_values(current.config, submitted_config)
         if not isinstance(config, dict):
             raise HTTPException(400, "config must be an object")
-        if config.get("allow_private") and not (current.config or {}).get("allow_private"):
+        if config.get("allow_private") and (
+            url != current.url or not (current.config or {}).get("allow_private")
+        ):
             _require_scope(request, "webhooks:private_network")
         store.upsert_destination(webhook_id, str(payload.get("name", current.name)), url,
                                  str(payload.get("method", current.method)), config,
