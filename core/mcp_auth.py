@@ -22,15 +22,20 @@ from pathlib import Path
 from typing import Iterable
 
 FINE_SCOPES = {
-    "connectors:read", "connectors:write",
-    "routes:read", "routes:write",
+    "connectors:read", "connectors:write", "connectors:delete", "connectors:rotate_secret",
+    "routes:read", "routes:write", "routes:delete",
     "deliveries:read", "deliveries:replay",
-    "events:read", "admin",
+    "events:read", "events:write", "health:read", "webhooks:test", "webhooks:private_network",
+    "deliveries:process", "admin",
+}
+EXPLICIT_SCOPES = {
+    "connectors:delete", "connectors:rotate_secret", "routes:delete",
+    "deliveries:replay", "webhooks:test", "webhooks:private_network", "deliveries:process",
 }
 SCOPE_ALIASES = {
-    "read": {"connectors:read", "routes:read", "deliveries:read", "events:read"},
+    "read": {"connectors:read", "routes:read", "deliveries:read", "events:read", "health:read"},
     "write": {"connectors:read", "connectors:write", "routes:read", "routes:write",
-              "deliveries:read", "deliveries:replay", "events:read"},
+              "deliveries:read", "events:read", "health:read"},
     "admin": {"admin"},
 }
 ALL_SCOPES = FINE_SCOPES | set(SCOPE_ALIASES)
@@ -43,6 +48,8 @@ class Principal:
     scopes: frozenset[str]
 
     def allows(self, required: str) -> bool:
+        if required in EXPLICIT_SCOPES:
+            return required in self.scopes
         return "admin" in self.scopes or required in self.scopes
 
 
@@ -108,9 +115,9 @@ class MCPAuthStore:
             self._conn.commit()
 
     def create_api_key(self, name: str, scopes: Iterable[str] | str | None = None) -> dict:
-        # Existing UI has no API-key scope control. Preserve its semantics by
-        # granting full control unless a caller explicitly supplies scopes.
-        scopes_n = normalize_scopes(scopes, default=["admin"])
+        # Unspecified remote credentials are read-only. Privileged control is
+        # granted explicitly by the credential owner.
+        scopes_n = normalize_scopes(scopes, default=["read"])
         key_id = "key_" + secrets.token_hex(8)
         secret = "prk_" + secrets.token_urlsafe(32)
         now = _now()

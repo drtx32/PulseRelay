@@ -32,6 +32,9 @@ The root URL serves the lightweight Paper-style Event Desk. Enter the value of
 `PULSERELAY_ADMIN_TOKEN` as the PulseRelay admin Bearer token. Event reads
 at `/v1/events` and `/v1/events/{event_id}` require that Bearer credential;
 `/healthz` remains public for uptime checks.
+Event ingestion at `POST /v1/events` requires `events:write`; built-in
+connectors use `PULSERELAY_INGEST_TOKEN` when configured, with the admin token
+as a compatibility fallback.
 
 SQLite data is stored in the `pulserelay-data` volume. Connector logs,
 supervisor state, and connector checkpoints are stored in

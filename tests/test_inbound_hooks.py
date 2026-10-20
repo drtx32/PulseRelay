@@ -14,17 +14,20 @@ from core.persistence import SQLitePhase9Store
 
 def make_client(tmp_path):
     store = SQLitePhase9Store(tmp_path / "hooks.db")
-    return TestClient(create_app(store)), store
+    app = create_app(store)
+    client = TestClient(app)
+    key = app.state.mcp_auth_store.create_api_key("test-admin", "admin")
+    return client, store, {"Authorization": f"Bearer {key['api_key']}"}
 
 
 def test_generated_hook_secret_is_returned_once_and_payload_is_persisted(tmp_path):
-    client, store = make_client(tmp_path)
-    created = client.post("/v1/hooks", json={"id": "source-a", "name": "Source A"})
+    client, store, auth = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "source-a", "name": "Source A"}, headers=auth)
     assert created.status_code == 200
     data = created.json()
     assert len(data["secret"]) >= 16
     assert data["url"].endswith(data["secret"])
-    assert "secret_hash" not in client.get("/v1/hooks").json()["hooks"][0]
+    assert "secret_hash" not in client.get("/v1/hooks", headers=auth).json()["hooks"][0]
 
     payload = {"id": "evt-hook-1", "event": {"type": "source.created", "dedupe_key": "source:1"},
                "source": {"type": "external", "id": "source-a"}, "content": {"text": "hello"}}
@@ -40,8 +43,8 @@ def test_generated_hook_secret_is_returned_once_and_payload_is_persisted(tmp_pat
 
 
 def test_hook_rejects_wrong_secret_and_oversized_body(tmp_path):
-    client, _ = make_client(tmp_path)
-    created = client.post("/v1/hooks", json={"id": "limited", "max_body_bytes": 8}).json()
+    client, _, auth = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "limited", "max_body_bytes": 8}, headers=auth).json()
     assert client.post(f"/v1/hooks/limited/wrong-secret", json={}).status_code == 404
     response = client.post(created["url"], content=b'{"too":"large"}', headers={"content-type": "application/json"})
     assert response.status_code == 413
@@ -49,8 +52,8 @@ def test_hook_rejects_wrong_secret_and_oversized_body(tmp_path):
 
 def test_hook_hmac_requires_fresh_timestamp_and_signature(tmp_path, monkeypatch):
     monkeypatch.setenv("HOOK_SIGNING_SECRET", "signing-secret")
-    client, _ = make_client(tmp_path)
-    created = client.post("/v1/hooks", json={"id": "signed", "hmac_secret_ref": "HOOK_SIGNING_SECRET"}).json()
+    client, _, auth = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "signed", "hmac_secret_ref": "HOOK_SIGNING_SECRET"}, headers=auth).json()
     body = json.dumps({"id": "signed-1", "event": {"type": "signed"}, "content": {"text": "ok"}}).encode()
     timestamp = str(int(time.time()))
     signature = hmac.new(b"signing-secret", timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
@@ -62,8 +65,8 @@ def test_hook_hmac_requires_fresh_timestamp_and_signature(tmp_path, monkeypatch)
 
 
 def test_hook_secret_uses_salted_slow_hash_and_raw_payload_is_deduplicated(tmp_path):
-    client, store = make_client(tmp_path)
-    created = client.post("/v1/hooks", json={"id": "raw"}).json()
+    client, store, auth = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "raw"}, headers=auth).json()
     endpoint = store.get_inbound_endpoint("raw")
     assert endpoint.secret_hash.startswith("pbkdf2_sha256$")
     assert endpoint.secret_hash != hashlib.sha256(created["secret"].encode()).hexdigest()
@@ -79,8 +82,8 @@ def test_hook_secret_uses_salted_slow_hash_and_raw_payload_is_deduplicated(tmp_p
 
 def test_hmac_rejects_non_finite_timestamp_and_sandbox_rejects_code_like_templates(tmp_path, monkeypatch):
     monkeypatch.setenv("HOOK_SIGNING_SECRET", "signing-secret")
-    client, _ = make_client(tmp_path)
-    created = client.post("/v1/hooks", json={"id": "finite", "hmac_secret_ref": "HOOK_SIGNING_SECRET"}).json()
+    client, _, auth = make_client(tmp_path)
+    created = client.post("/v1/hooks", json={"id": "finite", "hmac_secret_ref": "HOOK_SIGNING_SECRET"}, headers=auth).json()
     body = b'{"id":"nan-1","event":{"type":"signed"},"content":{"text":"ok"}}'
     signature = hmac.new(b"signing-secret", b"nan." + body, hashlib.sha256).hexdigest()
     response = client.post(created["url"], content=body, headers={"content-type": "application/json",

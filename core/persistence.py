@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.event import EventEnvelope, ensure_event
+from core.redaction import redact_sensitive_text
 
 
 @dataclass
@@ -433,6 +434,9 @@ class SQLitePhase9Store:
     def update_delivery(self, delivery_id: str, status: str, *, http_status: int | None = None,
                         error: str = "", request_excerpt: str = "", response_excerpt: str = "", external_id: str | None = None,
                         next_attempt_at: str | None = None) -> None:
+        error = redact_sensitive_text(error)
+        request_excerpt = redact_sensitive_text(request_excerpt)
+        response_excerpt = redact_sensitive_text(response_excerpt)
         completed = self._now() if status in {"success", "failed", "dead_letter", "skipped"} else None
         with self._lock:
             self._conn.execute("""UPDATE deliveries SET status=?,http_status=?,last_error=?,request_excerpt=?,response_excerpt=?,external_id=?,
@@ -445,6 +449,11 @@ class SQLitePhase9Store:
         params = [status, limit] if status else [limit]
         with self._lock: rows = self._conn.execute(query, params).fetchall()
         return [self._delivery_from_row(row) for row in rows]
+
+    def get_delivery(self, delivery_id: str) -> DeliveryRecord | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+        return None if row is None else self._delivery_from_row(row)
 
     def get_checkpoint(self, connector_id: str) -> CheckpointRecord | None:
         with self._lock: row = self._conn.execute("SELECT * FROM connector_checkpoints WHERE connector_id=?", (connector_id,)).fetchone()

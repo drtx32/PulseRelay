@@ -15,6 +15,7 @@ from mcp.server import MCPServer
 from core.control_plane import ControlPlaneError, ControlPlaneService
 from core.mcp_auth import current_principal, get_auth_store, require_scope
 from core.persistence import SQLitePhase9Store
+from core.redaction import restore_redacted_url, restore_redacted_values
 
 store = SQLitePhase9Store(os.getenv("PULSERELAY_DB_PATH", "data/pulserelay.db"))
 control = ControlPlaneService(store)
@@ -69,7 +70,7 @@ def create_webhook_inbound(connector_id: str, name: str, source_type: str = "web
 
 @mcp.tool()
 def rotate_webhook_inbound_secret(connector_id: str) -> dict[str, Any]:
-    if denied := _guard("connectors:write"): return denied
+    if denied := _guard("connectors:rotate_secret"): return denied
     try: return {"ok": True, "connector": control.rotate_webhook_inbound_secret(connector_id)}
     except ControlPlaneError as exc: return _error(exc)
 
@@ -94,6 +95,7 @@ def update_webhook_inbound(connector_id: str, name: str | None = None, source_ty
 def create_webhook_outbound(connector_id: str, name: str, url: str, method: str = "POST",
                             config: dict[str, Any] | None = None, enabled: bool = True) -> dict[str, Any]:
     if denied := _guard("connectors:write"): return denied
+    if (config or {}).get("allow_private") and (denied := _guard("webhooks:private_network")): return denied
     try: return {"ok": True, "connector": control.create_webhook_outbound(
         connector_id, name, url, method=method, config=config, enabled=enabled)}
     except ControlPlaneError as exc: return _error(exc)
@@ -104,6 +106,14 @@ def update_webhook_outbound(connector_id: str, name: str | None = None, url: str
                             method: str | None = None, config: dict[str, Any] | None = None,
                             enabled: bool | None = None) -> dict[str, Any]:
     if denied := _guard("connectors:write"): return denied
+    current = control.store.get_destination(connector_id)
+    if current is not None:
+        final_url = current.url if url is None else restore_redacted_url(current.url, url)
+        final_config = current.config if config is None else restore_redacted_values(current.config, config)
+        if final_config.get("allow_private") and (
+            final_url != current.url or not (current.config or {}).get("allow_private")
+        ) and (denied := _guard("webhooks:private_network")):
+            return denied
     try: return {"ok": True, "connector": control.update_webhook_outbound(
         connector_id, name=name, url=url, method=method, config=config, enabled=enabled)}
     except ControlPlaneError as exc: return _error(exc)
@@ -163,6 +173,34 @@ def get_topology() -> dict[str, Any]:
 def list_deliveries(limit: int = 50, status: str | None = None) -> dict[str, Any]:
     if denied := _guard("deliveries:read"): return denied
     return {"ok": True, "deliveries": control.list_deliveries(limit=limit, status=status)}
+
+
+@mcp.tool()
+def get_delivery(delivery_id: str) -> dict[str, Any]:
+    if denied := _guard("deliveries:read"): return denied
+    try: return {"ok": True, "delivery": control.get_delivery(delivery_id)}
+    except ControlPlaneError as exc: return _error(exc)
+
+
+@mcp.tool()
+def list_events(limit: int = 50, source_type: str | None = None,
+                event_type: str | None = None, status: str | None = None) -> dict[str, Any]:
+    if denied := _guard("events:read"): return denied
+    return {"ok": True, "events": control.list_events(
+        limit=limit, source_type=source_type, event_type=event_type, status=status)}
+
+
+@mcp.tool()
+def get_event(event_id: str) -> dict[str, Any]:
+    if denied := _guard("events:read"): return denied
+    try: return {"ok": True, "event": control.get_event(event_id)}
+    except ControlPlaneError as exc: return _error(exc)
+
+
+@mcp.tool()
+def get_health() -> dict[str, Any]:
+    if denied := _guard("health:read"): return denied
+    return {"ok": True, "status": "ok", "stats": store.stats()}
 
 
 class MCPControlPlaneAuth:

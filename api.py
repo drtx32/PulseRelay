@@ -30,6 +30,14 @@ from core.connector_index import get_connector_index
 from core.webhook_delivery import WebhookDelivery
 from core.event_bus import EventBus
 from core.aggregation import validate_aggregation_policy
+from core.mcp_auth import get_auth_store
+from core.redaction import (
+    redact_mapping,
+    redact_sensitive_text,
+    redact_url,
+    restore_redacted_url,
+    restore_redacted_values,
+)
 
 
 def _hash_secret(secret: str) -> str:
@@ -55,19 +63,35 @@ def _valid_secret(secret: str, secret_hash: str) -> bool:
         return hmac.compare_digest(hashlib.sha256(secret.encode("utf-8")).hexdigest(), secret_hash)
 
 
-def _require_read_auth(request: Request) -> None:
-    """Require the PulseRelay admin bearer before exposing event data."""
-    expected = os.getenv("PULSERELAY_ADMIN_TOKEN", "").strip()
-    if not expected:
-        raise HTTPException(503, "event read authentication is not configured")
-    supplied = request.headers.get("authorization", "")
-    scheme, _, token = supplied.partition(" ")
-    if scheme.lower() != "bearer" or not token or not hmac.compare_digest(token.strip(), expected):
+def _require_scope(request: Request, required: str, *, token: str | None = None) -> None:
+    supplied = token
+    if supplied is None:
+        authorization = request.headers.get("authorization", "")
+        scheme, _, supplied = authorization.partition(" ")
+        if scheme.lower() != "bearer":
+            supplied = ""
+    principal = request.app.state.mcp_auth_store.authenticate_bearer((supplied or "").strip())
+    if principal is None:
         raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
+    if not principal.allows(required):
+        raise HTTPException(403, f"missing scope: {required}")
 
 
 def _require_admin_auth(request: Request) -> None:
-    _require_read_auth(request)
+    _require_scope(request, "admin")
+
+
+def _public_delivery(item) -> dict[str, Any]:
+    result = item.__dict__.copy()
+    for key in ("request_excerpt", "response_excerpt", "last_error"):
+        result[key] = redact_sensitive_text(str(result.get(key) or ""))
+    return result
+
+
+def _public_destination(item) -> dict[str, Any]:
+    result = redact_mapping(item.__dict__.copy())
+    result["url"] = redact_url(item.url)
+    return result
 
 
 class EventStreamHub:
@@ -278,6 +302,7 @@ def _sync_connector_aggregation(store: SQLitePhase9Store, source_type: str, aggr
 
 def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     store = store or SQLitePhase9Store(os.getenv("PULSERELAY_DB_PATH", "data/pulserelay.db"))
+    auth_store = get_auth_store(store.db_path)
     event_bus = EventBus()
     relay = DurableRelay(store, event_bus=event_bus)
     connector_root = Path(os.getenv("PULSERELAY_CONNECTOR_ROOT", "connectors"))
@@ -291,6 +316,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         if connector_id:
             _sync_connector_aggregation(store, connector_id.replace("-", "_"), _connector_aggregation(connector_id))
     app = FastAPI(title="PulseRelay", version="1.0")
+    app.state.mcp_auth_store = auth_store
     event_stream = EventStreamHub()
     event_bus_task: asyncio.Task | None = None
 
@@ -298,7 +324,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         queue = event_bus.subscribe()
         try:
             while True:
-                await event_stream.broadcast(await queue.get())
+                await event_stream.broadcast(redact_mapping(await queue.get()))
         finally:
             event_bus.unsubscribe(queue)
 
@@ -328,7 +354,6 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.websocket("/v1/events/stream")
     async def event_stream_socket(websocket: WebSocket):
-        expected = os.getenv("PULSERELAY_ADMIN_TOKEN", "").strip()
         await websocket.accept()
         try:
             auth_message = await websocket.receive_text()
@@ -337,7 +362,8 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
                 supplied = str(auth_payload.get("token", "")).strip()
             except (TypeError, json.JSONDecodeError):
                 supplied = auth_message.strip()
-            if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+            principal = auth_store.authenticate_bearer(supplied) if supplied else None
+            if principal is None or not principal.allows("events:read"):
                 await websocket.close(code=1008)
                 return
             event_stream.connections.add(websocket)
@@ -350,9 +376,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.get("/v1/events/stream")
     async def event_stream_sse(request: Request, token: str = ""):
-        expected = os.getenv("PULSERELAY_ADMIN_TOKEN", "").strip()
-        if not expected or not token or not hmac.compare_digest(token.strip(), expected):
-            raise HTTPException(401, "authentication required", headers={"WWW-Authenticate": "Bearer"})
+        _require_scope(request, "events:read", token=token or None)
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         event_stream.sse_subscribers.add(queue)
 
@@ -372,6 +396,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.post("/v1/events")
     async def events(request: Request):
+        _require_scope(request, "events:write")
         try: payload = await request.json()
         except Exception as exc: raise HTTPException(400, "invalid JSON") from exc
         try:
@@ -382,7 +407,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.post("/v1/hooks")
     async def create_hook(payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:write")
         endpoint_id = str(payload.get("id") or f"hook_{secrets.token_hex(8)}")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", endpoint_id):
             raise HTTPException(400, "invalid endpoint id")
@@ -413,24 +438,25 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.get("/v1/hooks")
     async def list_hooks(request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:read")
         return {"hooks": [_endpoint_public(endpoint) for endpoint in store.list_inbound_endpoints()]}
 
     @app.get("/v1/hooks/{endpoint_id}")
     async def get_hook(endpoint_id: str, request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:read")
         endpoint = store.get_inbound_endpoint(endpoint_id)
         if endpoint is None: raise HTTPException(404, "hook not found")
         return _endpoint_public(endpoint)
 
     @app.put("/v1/hooks/{endpoint_id}")
     async def update_hook(endpoint_id: str, payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:write")
         endpoint = store.get_inbound_endpoint(endpoint_id)
         if endpoint is None: raise HTTPException(404, "hook not found")
         changes = {key: payload[key] for key in ("name", "enabled", "source_type", "response_template", "normalization_template", "max_body_bytes", "allowed_content_types", "hmac_secret_ref", "hmac_header", "hmac_timestamp_header", "hmac_max_age_seconds") if key in payload}
         new_secret = None
         if payload.get("rotate_secret"):
+            _require_scope(request, "connectors:rotate_secret")
             new_secret = secrets.token_urlsafe(32)
             changes["secret_hash"] = _hash_secret(new_secret)
         if "max_body_bytes" in changes:
@@ -448,7 +474,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.delete("/v1/hooks/{endpoint_id}")
     async def delete_hook(endpoint_id: str, request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:delete")
         if not store.delete_inbound_endpoint(endpoint_id):
             raise HTTPException(404, "hook not found")
         return {"deleted": True, "id": endpoint_id}
@@ -456,7 +482,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     @app.post("/v1/webhooks/{webhook_id}/test")
     async def test_webhook(webhook_id: str, payload: dict[str, Any], request: Request):
         """Send a non-routed diagnostic event to one outbound webhook."""
-        _require_admin_auth(request)
+        _require_scope(request, "webhooks:test")
         item = store.get_destination(webhook_id)
         if item is None:
             raise HTTPException(404, "webhook not found")
@@ -554,26 +580,26 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.get("/v1/events")
     async def list_events(request: Request, limit: int = 100):
-        _require_read_auth(request)
-        return {"events": [item.payload | {"status": item.status, "received_at": item.created_at} for item in store.list_events(limit=limit)]}
+        _require_scope(request, "events:read")
+        return {"events": [redact_mapping(item.payload | {"status": item.status, "received_at": item.created_at}) for item in store.list_events(limit=limit)]}
 
     @app.get("/v1/events/{event_id}")
     async def get_event(event_id: str, request: Request):
-        _require_read_auth(request)
+        _require_scope(request, "events:read")
         payload = store.get_event_payload(event_id)
         if not payload: raise HTTPException(404, "event not found")
-        return payload
+        return redact_mapping(payload)
 
     @app.post("/v1/routes")
     async def create_route(payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "routes:write")
         match = payload.get("match") or {}
         source_type = str(match.get("source.type") or str(match.get("event.type", "")).split(".", 1)[0])
         aggregation = payload.get("aggregate", payload.get("aggregation"))
         if aggregation is None and source_type:
             aggregation = _connector_aggregation(source_type)
         try:
-            if aggregation is not None:
+            if aggregation:
                 aggregation = validate_aggregation_policy(aggregation)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -584,18 +610,12 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
 
     @app.get("/v1/routes")
     async def routes(request: Request):
-        _require_admin_auth(request)
-        for route in store.list_routes():
-            source_type = str(route.match.get("source.type") or str(route.match.get("event.type", "")).split(".", 1)[0])
-            if source_type and not route.aggregation:
-                store.upsert_route(route.id, route.name, route.match, _connector_aggregation(source_type), route.trigger, route.enabled, store.route_destinations(route.id))
-            if source_type:
-                _sync_connector_webhooks(store, source_type)
-        return {"routes": [route.__dict__ | {"destinations": store.route_destinations(route.id)} for route in store.list_routes()]}
+        _require_scope(request, "routes:read")
+        return {"routes": [redact_mapping(route.__dict__ | {"destinations": store.route_destinations(route.id)}) for route in store.list_routes()]}
 
     @app.delete("/v1/routes/{route_id}")
     async def delete_route(route_id: str, request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "routes:delete")
         route = next((item for item in store.list_routes() if item.id == route_id), None)
         if route is None:
             raise HTTPException(404, "route not found")
@@ -609,66 +629,79 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     # Public API semantics: /v1/hooks is inbound; /v1/webhooks is outbound.
     @app.post("/v1/webhooks")
     async def create_webhook(payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:write")
         webhook_id = str(payload.get("id") or f"webhook_{secrets.token_hex(8)}")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", webhook_id):
             raise HTTPException(400, "invalid webhook id")
         url = str(payload.get("url") or payload.get("target_url") or "").strip()
         if not re.match(r"^https?://", url, re.IGNORECASE):
             raise HTTPException(400, "webhook url must start with http:// or https://")
+        config = payload.get("config") or {}
+        if not isinstance(config, dict):
+            raise HTTPException(400, "config must be an object")
+        if config.get("allow_private"):
+            _require_scope(request, "webhooks:private_network")
         if store.get_destination(webhook_id) and not payload.get("replace"):
             raise HTTPException(409, "webhook already exists")
         store.upsert_destination(webhook_id, str(payload.get("name") or webhook_id), url,
-                                 str(payload.get("method") or "POST"), payload.get("config") or {},
+                                 str(payload.get("method") or "POST"), config,
                                  bool(payload.get("enabled", True)))
-        return {"webhook": store.get_destination(webhook_id).__dict__}
+        return {"webhook": _public_destination(store.get_destination(webhook_id))}
 
     @app.get("/v1/webhooks")
     async def list_webhooks(request: Request):
-        _require_admin_auth(request)
-        return {"webhooks": [item.__dict__ for item in store.list_destinations()]}
+        _require_scope(request, "connectors:read")
+        return {"webhooks": [_public_destination(item) for item in store.list_destinations()]}
 
     @app.get("/v1/webhooks/{webhook_id}/deliveries")
     async def webhook_deliveries(webhook_id: str, request: Request, limit: int = 50):
-        _require_admin_auth(request)
+        _require_scope(request, "deliveries:read")
         if store.get_destination(webhook_id) is None:
             raise HTTPException(404, "webhook not found")
         bounded_limit = max(1, min(int(limit), 100))
         deliveries = [item.__dict__ for item in store.list_deliveries(bounded_limit)]
-        return {"deliveries": [item for item in deliveries if item["destination_id"] == webhook_id]}
+        return {"deliveries": [redact_mapping(item) for item in deliveries if item["destination_id"] == webhook_id]}
 
     @app.get("/v1/webhooks/{webhook_id}")
     async def get_webhook(webhook_id: str, request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:read")
         item = store.get_destination(webhook_id)
         if item is None:
             raise HTTPException(404, "webhook not found")
-        return {"webhook": item.__dict__}
+        return {"webhook": _public_destination(item)}
 
     @app.put("/v1/webhooks/{webhook_id}")
     async def update_webhook(webhook_id: str, payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:write")
         current = store.get_destination(webhook_id)
         if current is None:
             raise HTTPException(404, "webhook not found")
-        url = str(payload.get("url", current.url)).strip()
+        url = restore_redacted_url(current.url, str(payload.get("url", current.url)).strip())
         if not re.match(r"^https?://", url, re.IGNORECASE):
             raise HTTPException(400, "webhook url must start with http:// or https://")
+        submitted_config = payload.get("config", current.config)
+        config = restore_redacted_values(current.config, submitted_config)
+        if not isinstance(config, dict):
+            raise HTTPException(400, "config must be an object")
+        if config.get("allow_private") and (
+            url != current.url or not (current.config or {}).get("allow_private")
+        ):
+            _require_scope(request, "webhooks:private_network")
         store.upsert_destination(webhook_id, str(payload.get("name", current.name)), url,
-                                 str(payload.get("method", current.method)), payload.get("config", current.config),
+                                 str(payload.get("method", current.method)), config,
                                  bool(payload.get("enabled", current.enabled)))
-        return {"webhook": store.get_destination(webhook_id).__dict__}
+        return {"webhook": _public_destination(store.get_destination(webhook_id))}
 
     @app.delete("/v1/webhooks/{webhook_id}")
     async def delete_webhook(webhook_id: str, request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:delete")
         if not store.delete_destination(webhook_id):
             raise HTTPException(404, "webhook not found")
         return {"deleted": True, "id": webhook_id}
 
     @app.get("/v1/connectors")
     async def connectors(request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:read")
         result: list[dict[str, Any]] = []
         if not connector_root.is_dir():
             return {"connectors": result}
@@ -677,17 +710,18 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
             parsed = item.get("manifest_json", {})
             raw_webhooks = parsed.get("webhooks", []) if isinstance(parsed, dict) else []
             configured = []
+            configured_urls: set[str] = set()
             for webhook in raw_webhooks if isinstance(raw_webhooks, list) else []:
                 webhook = {"url": webhook} if isinstance(webhook, str) else webhook
                 if not isinstance(webhook, dict) or not webhook.get("url"): continue
                 url = str(webhook["url"])
-                configured.append({"name": str(webhook.get("name") or url), "url": url,
+                configured_urls.add(url)
+                configured.append({"name": str(webhook.get("name") or redact_url(url)), "url": redact_url(url),
                                    "enabled": bool(webhook.get("enabled", True)), "valid": url in known_urls})
             # Routes are the delivery source of truth. A bind-mounted manifest
             # may be read-only to the API container, so always include route
             # destinations in the connector projection even when the YAML
             # materialization step could not write back to disk.
-            configured_urls = {entry["url"] for entry in configured}
             connector_id = str(item.get("id") or "")
             for route in store.list_routes():
                 route_source = route.match.get("source.type") or str(route.match.get("event.type", "")).split(".", 1)[0]
@@ -697,15 +731,15 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
                     destination = store.get_destination(destination_id)
                     if destination is None or destination.url in configured_urls:
                         continue
-                    configured.append({"name": destination.name, "url": destination.url,
+                    configured.append({"name": destination.name, "url": redact_url(destination.url),
                                        "enabled": destination.enabled, "valid": True})
                     configured_urls.add(destination.url)
-            result.append({**item, "webhooks": configured})
+            result.append(redact_mapping({**item, "webhooks": configured}))
         return {"connectors": result}
 
     @app.put("/v1/connectors/{connector_id}")
     async def update_connector(connector_id: str, payload: dict[str, Any], request: Request):
-        _require_admin_auth(request)
+        _require_scope(request, "connectors:write")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", connector_id):
             raise HTTPException(400, "invalid connector id")
         manifest_path = connector_root / connector_id / "connector.yaml"
@@ -780,14 +814,19 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         return await __import__("asyncio").to_thread(_gbrain_admin_call, "/admin/api/revoke-client", "POST", payload)
 
     @app.get("/v1/deliveries")
-    async def deliveries(limit: int = 100): return {"deliveries": [item.__dict__ for item in store.list_deliveries(limit)]}
+    async def deliveries(request: Request, limit: int = 100):
+        _require_scope(request, "deliveries:read")
+        return {"deliveries": [_public_delivery(item) for item in store.list_deliveries(limit)]}
 
     @app.post("/v1/deliveries/process")
-    async def process_delivery():
+    async def process_delivery(request: Request):
+        _require_scope(request, "deliveries:process")
         result = await relay.process_one()
         return {"processed": result is not None, "status": result.status if result else None}
 
     @app.post("/v1/batches/flush")
-    async def flush(): return {"queued": relay.flush()}
+    async def flush(request: Request):
+        _require_scope(request, "deliveries:process")
+        return {"queued": relay.flush()}
 
     return app

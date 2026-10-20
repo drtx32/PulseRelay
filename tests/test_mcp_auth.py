@@ -23,19 +23,22 @@ class MCPAuthStoreTests(unittest.TestCase):
     def test_gbrain_style_scope_aliases_expand(self):
         self.assertEqual(
             set(normalize_scopes("read")),
-            {"connectors:read", "routes:read", "deliveries:read", "events:read"},
+            {"connectors:read", "routes:read", "deliveries:read", "events:read", "health:read"},
         )
         write = set(normalize_scopes("write"))
         self.assertIn("connectors:write", write)
         self.assertIn("routes:write", write)
-        self.assertIn("deliveries:replay", write)
+        self.assertNotIn("deliveries:replay", write)
+        self.assertNotIn("webhooks:test", write)
+        self.assertNotIn("events:write", write)
 
-    def test_api_key_without_scope_is_full_control_for_existing_ui(self):
-        created = self.store.create_api_key("web-ui-key")
+    def test_api_key_without_scope_defaults_to_read_only(self):
+        created = self.store.create_api_key("remote-agent")
         principal = self.store.authenticate_bearer(created["api_key"])
         self.assertIsNotNone(principal)
-        self.assertTrue(principal.allows("connectors:write"))
-        self.assertTrue(principal.allows("routes:write"))
+        self.assertTrue(principal.allows("connectors:read"))
+        self.assertFalse(principal.allows("connectors:write"))
+        self.assertFalse(principal.allows("routes:write"))
         self.assertEqual(principal.auth_type, "api_key")
 
     def test_api_key_can_be_scoped_and_revoked_by_name(self):
@@ -76,7 +79,18 @@ class MCPAuthStoreTests(unittest.TestCase):
         principal = self.store.authenticate_bearer("bootstrap-secret")
         self.assertEqual(principal.auth_type, "admin_token")
         self.assertTrue(principal.allows("connectors:write"))
-        self.assertTrue(principal.allows("deliveries:replay"))
+        self.assertFalse(principal.allows("deliveries:replay"))
+        self.assertFalse(principal.allows("webhooks:test"))
+        self.assertTrue(principal.allows("events:write"))
+
+    def test_sensitive_capabilities_need_explicit_scopes_even_for_admin(self):
+        created = self.store.create_api_key("scoped-admin", "admin connectors:rotate_secret routes:delete webhooks:test")
+        principal = self.store.authenticate_bearer(created["api_key"])
+        self.assertTrue(principal.allows("routes:write"))
+        self.assertTrue(principal.allows("connectors:rotate_secret"))
+        self.assertTrue(principal.allows("routes:delete"))
+        self.assertTrue(principal.allows("webhooks:test"))
+        self.assertFalse(principal.allows("deliveries:replay"))
 
 
 if __name__ == "__main__":

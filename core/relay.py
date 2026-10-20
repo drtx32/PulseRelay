@@ -57,7 +57,7 @@ def _sms_body_text(event: EventEnvelope) -> str:
 def _aggregated_content_text(events: list[EventEnvelope]) -> str:
     sms_events = [event for event in events if event.source.type == "sms_forwarder"]
     if not sms_events:
-        return "\n\n".join(str(event.content.text or "") for event in events)
+        return "\n".join(str(event.content.text or "") for event in events)
     sender, received_at = _sms_metadata(sms_events[-1])
     header = f"SmsForwarder 消息\n来源：{sender}\n时间：{received_at}"
     return header + "\n\n" + "\n\n".join(_sms_body_text(event) for event in events)

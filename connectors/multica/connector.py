@@ -20,6 +20,7 @@ MULTICA_API_URL = _configured_env("MULTICA_API_URL", "https://multica.ai").rstri
 MULTICA_API_TOKEN = (_configured_env("MULTICA_API_TOKEN") or _configured_env("MULTICA_API_KEY")).strip()
 AUTOPILOT_IDS = [item.strip() for item in _configured_env("MULTICA_AUTOPILOT_IDS").split(",") if item.strip()]
 INGEST_URL = _configured_env("PULSERELAY_INGEST_URL")
+INGEST_TOKEN = _configured_env("PULSERELAY_INGEST_TOKEN") or _configured_env("PULSERELAY_ADMIN_TOKEN")
 INTERVAL = max(5, int(float(os.environ.get("POLL_INTERVAL_SECONDS", "60"))))
 STATE_DIR = Path(os.environ.get("PULSERELAY_STATE_DIR", ".state"))
 STATE_FILE = STATE_DIR / "checkpoint.json"
@@ -118,8 +119,11 @@ def normalize_run(autopilot_id: str, run: dict) -> dict:
 def publish(event: dict) -> None:
     if not INGEST_URL:
         raise RuntimeError("PULSERELAY_INGEST_URL is required")
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
     request = Request(INGEST_URL, data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-                      headers={"Content-Type": "application/json"}, method="POST")
+                      headers=headers, method="POST")
     with urlopen(request, timeout=30) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"PulseRelay rejected event with HTTP {response.status}")

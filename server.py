@@ -58,8 +58,8 @@ async def mcp_scopes(request: Request):
     return {
         "scopes": sorted(ALL_SCOPES),
         "presets": {
-            "read": ["connectors:read", "routes:read", "deliveries:read", "events:read"],
-            "write": ["connectors:read", "connectors:write", "routes:read", "routes:write", "deliveries:read", "deliveries:replay", "events:read"],
+            "read": ["connectors:read", "routes:read", "deliveries:read", "events:read", "health:read"],
+            "write": ["connectors:read", "connectors:write", "routes:read", "routes:write", "deliveries:read", "events:read", "health:read"],
             "admin": ["admin"],
         },
     }

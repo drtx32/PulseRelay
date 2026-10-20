@@ -34,6 +34,7 @@ if not OAUTH_TOKEN_URL and MCP_URL:
 LIST_RUNS_TOOL = os.environ.get("GBRAIN_LIST_RUNS_TOOL", "list_pages")
 GET_OUTPUT_TOOL = os.environ.get("GBRAIN_GET_OUTPUT_TOOL", "get_page")
 INGEST_URL = os.environ.get("PULSERELAY_INGEST_URL", "").strip()
+INGEST_TOKEN = os.environ.get("PULSERELAY_INGEST_TOKEN", "").strip() or os.environ.get("PULSERELAY_ADMIN_TOKEN", "").strip()
 INTERVAL = max(5, int(float(os.environ.get("POLL_INTERVAL_SECONDS", "60"))))
 STATE_DIR = Path(os.environ.get("PULSERELAY_STATE_DIR", ".state"))
 STATE_FILE = STATE_DIR / "checkpoint.json"
@@ -44,9 +45,27 @@ IGNORE_PATHS = json.loads(os.environ.get("PULSERELAY_IGNORE_PATHS_JSON", "[]"))
 def path_is_watched(path: str) -> bool:
     """Match normalized output slugs against connector.yaml path patterns."""
     normalized = path.strip("/")
-    if any(fnmatchcase(normalized, pattern.strip("/")) for pattern in IGNORE_PATHS):
+
+    def matches(pattern: str) -> bool:
+        # fnmatch lets ** cross path separators, but `**/` still requires a
+        # slash. Also try the zero-directory expansion so patterns such as
+        # `notes/private/**/*plan*` match `notes/private/today-plan`.
+        candidates = {pattern.strip("/")}
+        pending = list(candidates)
+        while pending:
+            candidate = pending.pop()
+            marker = candidate.find("**/")
+            while marker >= 0:
+                expanded = candidate[:marker] + candidate[marker + 3:]
+                if expanded not in candidates:
+                    candidates.add(expanded)
+                    pending.append(expanded)
+                marker = candidate.find("**/", marker + 3)
+        return any(fnmatchcase(normalized, candidate) for candidate in candidates)
+
+    if any(matches(pattern) for pattern in IGNORE_PATHS):
         return False
-    return not WATCH_PATHS or any(fnmatchcase(normalized, pattern.strip("/")) for pattern in WATCH_PATHS)
+    return not WATCH_PATHS or any(matches(pattern) for pattern in WATCH_PATHS)
 
 
 def _json_env(name: str, default: dict[str, Any]) -> dict[str, Any]:
@@ -307,8 +326,11 @@ def is_verified_completed(run: dict[str, Any]) -> bool:
 
 
 def publish(event: dict[str, Any]) -> None:
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
     request = Request(INGEST_URL, data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-                      headers={"Content-Type": "application/json"}, method="POST")
+                      headers=headers, method="POST")
     with urlopen(request, timeout=30) as response:
         if response.status < 200 or response.status >= 300:
             raise RuntimeError(f"PulseRelay rejected event with HTTP {response.status}")
