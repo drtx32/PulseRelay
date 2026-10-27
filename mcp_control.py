@@ -40,6 +40,51 @@ def _guard(scope: str):
     except PermissionError as exc:
         return _error(exc)
 
+@mcp.tool()
+def list_flows() -> dict[str, Any]:
+    if denied := _guard("routes:read"): return denied
+    return {"ok":True,"flows":control.list_flows()}
+
+@mcp.tool()
+def get_flow(flow_id: str) -> dict[str, Any]:
+    if denied := _guard("routes:read"): return denied
+    try:return {"ok":True,"flow":control.get_flow(flow_id)}
+    except ControlPlaneError as exc:return _error(exc)
+
+@mcp.tool()
+def create_flow(flow: dict[str, Any]) -> dict[str, Any]:
+    if denied := _guard("routes:write"): return denied
+    try:return {"ok":True,"flow":control.create_flow(flow)}
+    except ControlPlaneError as exc:return _error(exc)
+
+@mcp.tool()
+def update_flow(flow_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    if denied := _guard("routes:write"): return denied
+    try:return {"ok":True,"flow":control.update_flow(flow_id,changes)}
+    except ControlPlaneError as exc:return _error(exc)
+
+@mcp.tool()
+def disable_flow(flow_id: str) -> dict[str, Any]:
+    if denied := _guard("routes:write"): return denied
+    try:return {"ok":True,"flow":control.disable_flow(flow_id)}
+    except ControlPlaneError as exc:return _error(exc)
+
+@mcp.tool()
+def validate_flow(flow: dict[str, Any]) -> dict[str, Any]:
+    if denied := _guard("routes:read"): return denied
+    return {"ok":True,"validation":control.validate_flow(flow)}
+
+@mcp.tool()
+def get_flow_run(run_id: str) -> dict[str, Any]:
+    if denied := _guard("deliveries:read"): return denied
+    try:return {"ok":True,"flow_run":control.get_flow_run(run_id)}
+    except ControlPlaneError as exc:return _error(exc)
+
+@mcp.tool()
+def list_flow_runs(limit: int = 100) -> dict[str, Any]:
+    if denied := _guard("deliveries:read"): return denied
+    return {"ok":True,"flow_runs":control.list_flow_runs(limit)}
+
 
 @mcp.tool()
 def list_connectors() -> dict[str, Any]:

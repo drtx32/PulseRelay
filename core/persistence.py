@@ -36,6 +36,8 @@ class DeliveryRecord:
     completed_at: str | None
     created_at: str
     updated_at: str
+    flow_run_id: str | None = None
+    node_id: str | None = None
 
 
 @dataclass
@@ -242,6 +244,11 @@ class SQLitePhase9Store:
                 hmac_timestamp_header TEXT NOT NULL DEFAULT 'X-PulseRelay-Timestamp', hmac_max_age_seconds INTEGER NOT NULL DEFAULT 300,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS flows (id TEXT PRIMARY KEY,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS flow_nodes (flow_id TEXT NOT NULL,node_id TEXT NOT NULL,type TEXT NOT NULL,endpoint_id TEXT NOT NULL DEFAULT '',expression_json TEXT NOT NULL DEFAULT '{}',template TEXT NOT NULL DEFAULT '',PRIMARY KEY(flow_id,node_id));
+            CREATE TABLE IF NOT EXISTS flow_edges (flow_id TEXT NOT NULL,source_id TEXT NOT NULL,target_id TEXT NOT NULL,ordinal INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(flow_id,source_id,target_id));
+            CREATE TABLE IF NOT EXISTS flow_runs (id TEXT PRIMARY KEY,flow_id TEXT NOT NULL,event_id TEXT NOT NULL,status TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',started_at TEXT NOT NULL,completed_at TEXT);
+            CREATE TABLE IF NOT EXISTS node_runs (id TEXT PRIMARY KEY,flow_run_id TEXT NOT NULL,node_id TEXT NOT NULL,status TEXT NOT NULL,input_json TEXT NOT NULL DEFAULT '{}',output_json TEXT NOT NULL DEFAULT '{}',error TEXT NOT NULL DEFAULT '',started_at TEXT NOT NULL,completed_at TEXT,delivery_id TEXT);
             """
         )
         # Keep this additive so existing installations retain their delivery
@@ -249,7 +256,52 @@ class SQLitePhase9Store:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(deliveries)").fetchall()}
         if "request_excerpt" not in columns:
             self._conn.execute("ALTER TABLE deliveries ADD COLUMN request_excerpt TEXT NOT NULL DEFAULT ''")
+        if "flow_run_id" not in columns: self._conn.execute("ALTER TABLE deliveries ADD COLUMN flow_run_id TEXT")
+        if "node_id" not in columns: self._conn.execute("ALTER TABLE deliveries ADD COLUMN node_id TEXT")
         self._conn.commit()
+
+    def upsert_flow(self, flow_id: str, name: str, enabled: bool, nodes: list[dict[str, Any]], edges: list[list[str]]) -> None:
+        now=self._now()
+        with self._lock:
+            self._conn.execute("INSERT INTO flows VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,enabled=excluded.enabled,updated_at=excluded.updated_at",(flow_id,name,int(enabled),now,now))
+            self._conn.execute("DELETE FROM flow_nodes WHERE flow_id=?",(flow_id,)); self._conn.execute("DELETE FROM flow_edges WHERE flow_id=?",(flow_id,))
+            self._conn.executemany("INSERT INTO flow_nodes VALUES(?,?,?,?,?,?)",[(flow_id,n['id'],n['type'],n.get('endpoint_id',''),json.dumps(n.get('expression') or {}),n.get('template','')) for n in nodes])
+            self._conn.executemany("INSERT INTO flow_edges VALUES(?,?,?,?)",[(flow_id,a,b,i) for i,(a,b) in enumerate(edges)])
+            self._conn.commit()
+
+    def list_flows(self, enabled_only: bool=False) -> list[dict[str,Any]]:
+        with self._lock: rows=self._conn.execute("SELECT * FROM flows"+(' WHERE enabled=1' if enabled_only else '')+" ORDER BY id").fetchall()
+        return [self.get_flow(r['id']) for r in rows]
+
+    def get_flow(self, flow_id: str) -> dict[str,Any] | None:
+        with self._lock:
+            f=self._conn.execute("SELECT * FROM flows WHERE id=?",(flow_id,)).fetchone()
+            if not f:return None
+            ns=self._conn.execute("SELECT * FROM flow_nodes WHERE flow_id=? ORDER BY rowid",(flow_id,)).fetchall(); es=self._conn.execute("SELECT source_id,target_id FROM flow_edges WHERE flow_id=? ORDER BY ordinal",(flow_id,)).fetchall()
+        return {'id':f['id'],'name':f['name'],'enabled':bool(f['enabled']),'nodes':[{'id':n['node_id'],'type':n['type'],'endpoint_id':n['endpoint_id'],'expression':json.loads(n['expression_json']),'template':n['template']} for n in ns],'edges':[[e['source_id'],e['target_id']] for e in es]}
+
+    def set_flow_enabled(self, flow_id: str, enabled: bool) -> bool:
+        with self._lock:
+            c=self._conn.execute("UPDATE flows SET enabled=?,updated_at=? WHERE id=?",(int(enabled),self._now(),flow_id)); self._conn.commit(); return bool(c.rowcount)
+
+    def create_flow_run(self, run_id: str, flow_id: str, event_id: str) -> None:
+        with self._lock:self._conn.execute("INSERT INTO flow_runs VALUES(?,?,?,'running','',?,NULL)",(run_id,flow_id,event_id,self._now()));self._conn.commit()
+
+    def finish_flow_run(self, run_id: str, status: str, error: str='') -> None:
+        with self._lock:self._conn.execute("UPDATE flow_runs SET status=?,error=?,completed_at=? WHERE id=?",(status,error,self._now(),run_id));self._conn.commit()
+
+    def create_node_run(self, run_id: str,node_id: str,status: str,input_value: Any,output_value: Any=None,error: str='',delivery_id: str|None=None) -> None:
+        with self._lock:self._conn.execute("INSERT INTO node_runs VALUES(?,?,?,?,?,?,?,?,?,?)",(run_id+':'+node_id,run_id,node_id,status,json.dumps(input_value,default=str),json.dumps(output_value,default=str),error,self._now(),self._now(),delivery_id));self._conn.commit()
+
+    def get_flow_run(self, run_id: str) -> dict[str,Any]|None:
+        with self._lock:
+            r=self._conn.execute("SELECT * FROM flow_runs WHERE id=?",(run_id,)).fetchone(); ns=self._conn.execute("SELECT * FROM node_runs WHERE flow_run_id=? ORDER BY rowid",(run_id,)).fetchall()
+        if not r:return None
+        return dict(r)|{'node_runs':[dict(n)|{'input':json.loads(n['input_json']),'output':json.loads(n['output_json'])} for n in ns]}
+
+    def list_flow_runs(self, limit: int=100) -> list[dict[str,Any]]:
+        with self._lock: rows=self._conn.execute("SELECT id FROM flow_runs ORDER BY started_at DESC LIMIT ?",(min(max(limit,1),500),)).fetchall()
+        return [self.get_flow_run(r['id']) for r in rows]
 
     def record_event(
         self,
@@ -403,11 +455,12 @@ class SQLitePhase9Store:
         return [ensure_event(json.loads(row[0])) for row in rows]
 
     def create_delivery(self, delivery_id: str, destination_id: str, idempotency_key: str,
-                        event_id: str | None = None, batch_id: str | None = None, next_attempt_at: str | None = None) -> bool:
+                        event_id: str | None = None, batch_id: str | None = None, next_attempt_at: str | None = None,
+                        flow_run_id: str | None = None, node_id: str | None = None) -> bool:
         now = self._now()
         with self._lock:
-            cur = self._conn.execute("""INSERT OR IGNORE INTO deliveries(id,event_id,batch_id,destination_id,idempotency_key,next_attempt_at,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?)""", (delivery_id, event_id, batch_id, destination_id, idempotency_key, next_attempt_at or now, now, now))
+            cur = self._conn.execute("""INSERT OR IGNORE INTO deliveries(id,event_id,batch_id,destination_id,idempotency_key,next_attempt_at,created_at,updated_at,flow_run_id,node_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (delivery_id, event_id, batch_id, destination_id, idempotency_key, next_attempt_at or now, now, now, flow_run_id, node_id))
             self._conn.commit()
             return bool(cur.rowcount)
 
@@ -429,7 +482,7 @@ class SQLitePhase9Store:
 
     @staticmethod
     def _delivery_from_row(row) -> DeliveryRecord:
-        return DeliveryRecord(row["id"], row["event_id"], row["batch_id"], row["destination_id"], row["idempotency_key"], row["status"], row["attempts"], row["next_attempt_at"], row["claimed_by"], row["lease_expires_at"], row["http_status"], row["external_id"], row["request_excerpt"], row["response_excerpt"], row["last_error"], row["completed_at"], row["created_at"], row["updated_at"])
+        return DeliveryRecord(row["id"], row["event_id"], row["batch_id"], row["destination_id"], row["idempotency_key"], row["status"], row["attempts"], row["next_attempt_at"], row["claimed_by"], row["lease_expires_at"], row["http_status"], row["external_id"], row["request_excerpt"], row["response_excerpt"], row["last_error"], row["completed_at"], row["created_at"], row["updated_at"], row["flow_run_id"], row["node_id"])
 
     def update_delivery(self, delivery_id: str, status: str, *, http_status: int | None = None,
                         error: str = "", request_excerpt: str = "", response_excerpt: str = "", external_id: str | None = None,

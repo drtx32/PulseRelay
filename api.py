@@ -24,6 +24,7 @@ from jinja2 import StrictUndefined, nodes
 import yaml
 
 from core.event import ensure_event
+from core.control_plane import ControlPlaneError, ControlPlaneService
 from core.persistence import SQLitePhase9Store
 from core.relay import DurableRelay
 from core.connector_index import get_connector_index
@@ -568,7 +569,7 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
             normalized_event = ensure_event(payload, source_type=endpoint.source_type)
             if not normalized_event.event.dedupe_key:
                 normalized_event.event.dedupe_key = f"hook:{endpoint.id}:{hashlib.sha256(body).hexdigest()}"
-            event, duplicate = relay.ingest(normalized_event, source_type=endpoint.source_type)
+            event, duplicate = relay.ingest(normalized_event, source_type=endpoint.source_type, endpoint_id=endpoint.id)
         except Exception as exc: raise HTTPException(503, "event persistence failed") from exc
         if endpoint.response_template:
             try: return Response(_render(endpoint.response_template, event=event.to_dict(), duplicate=duplicate), media_type="application/json")
@@ -612,6 +613,51 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
     async def routes(request: Request):
         _require_scope(request, "routes:read")
         return {"routes": [redact_mapping(route.__dict__ | {"destinations": store.route_destinations(route.id)}) for route in store.list_routes()]}
+
+    @app.get("/v1/flows")
+    async def list_flows(request: Request):
+        _require_scope(request, "routes:read")
+        return {"flows": ControlPlaneService(store).list_flows()}
+
+    @app.post("/v1/flows")
+    async def create_flow(payload: dict[str, Any], request: Request):
+        _require_scope(request, "routes:write")
+        try: return {"flow": ControlPlaneService(store).create_flow(payload)}
+        except ControlPlaneError as exc: raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/flows/validate")
+    async def validate_flow(payload: dict[str, Any], request: Request):
+        _require_scope(request, "routes:read")
+        return {"validation": ControlPlaneService(store).validate_flow(payload)}
+
+    @app.get("/v1/flows/{flow_id}")
+    async def get_flow(flow_id: str, request: Request):
+        _require_scope(request, "routes:read")
+        try: return {"flow": ControlPlaneService(store).get_flow(flow_id)}
+        except ControlPlaneError as exc: raise HTTPException(404, str(exc)) from exc
+
+    @app.put("/v1/flows/{flow_id}")
+    async def update_flow(flow_id: str, payload: dict[str, Any], request: Request):
+        _require_scope(request, "routes:write")
+        try: return {"flow": ControlPlaneService(store).update_flow(flow_id, payload)}
+        except ControlPlaneError as exc: raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/v1/flows/{flow_id}/disable")
+    async def disable_flow(flow_id: str, request: Request):
+        _require_scope(request, "routes:write")
+        try: return {"flow": ControlPlaneService(store).disable_flow(flow_id)}
+        except ControlPlaneError as exc: raise HTTPException(404, str(exc)) from exc
+
+    @app.get("/v1/flow-runs")
+    async def list_flow_runs(request: Request, limit: int = 100):
+        _require_scope(request, "deliveries:read")
+        return {"flow_runs": ControlPlaneService(store).list_flow_runs(limit)}
+
+    @app.get("/v1/flow-runs/{run_id}")
+    async def get_flow_run(run_id: str, request: Request):
+        _require_scope(request, "deliveries:read")
+        try: return {"flow_run": ControlPlaneService(store).get_flow_run(run_id)}
+        except ControlPlaneError as exc: raise HTTPException(404, str(exc)) from exc
 
     @app.delete("/v1/routes/{route_id}")
     async def delete_route(route_id: str, request: Request):
