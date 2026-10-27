@@ -2,6 +2,7 @@ from core.event import ensure_event
 from core.flows import execute_flow, validate_flow
 from core.persistence import SQLitePhase9Store
 from core.mcp_auth import Principal, current_principal, normalize_scopes
+from core.control_plane import ControlPlaneService
 
 
 def make_store(tmp_path):
@@ -79,6 +80,11 @@ def test_flow_mcp_scopes_admin_mutation_readback_and_redaction(tmp_path, monkeyp
         store.set_flow_enabled("secured", True)
         flow_run_id = execute_flow(store, store.get_flow("secured"), event, "in")
         assert mcp_control.get_flow_run(flow_run_id)["flow_run"]["node_runs"]
+        store.create_node_run(flow_run_id, "secret-node", "success", {}, {"api_key": "top-secret"})
+        assert "top-secret" not in str(ControlPlaneService(store).get_flow_run(flow_run_id))
+        store.create_delivery("secret-delivery", "out", "secret-key", event_id=event.id)
+        store.update_delivery("secret-delivery", "failed", error="Authorization: Bearer top-secret")
+        assert "top-secret" not in str(ControlPlaneService(store).get_delivery("secret-delivery"))
     finally:
         current_principal.reset(admin)
 

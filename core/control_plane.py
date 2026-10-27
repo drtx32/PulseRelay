@@ -93,8 +93,11 @@ class ControlPlaneService:
     def get_flow_run(self, run_id):
         run=self.store.get_flow_run(run_id)
         if not run: raise ControlPlaneError('flow run not found')
+        for node_run in run.get('node_runs', []):
+            node_run.pop('input_json', None)
+            node_run.pop('output_json', None)
         return redact_mapping(run)
-    def list_flow_runs(self, limit=100): return [redact_mapping(run) for run in self.store.list_flow_runs(limit)]
+    def list_flow_runs(self, limit=100): return [self.get_flow_run(run['id']) for run in self.store.list_flow_runs(limit)]
 
     @staticmethod
     def _public_inbound(record) -> dict[str, Any]:
