@@ -63,6 +63,39 @@ class ControlPlaneService:
     def __init__(self, store: SQLitePhase9Store):
         self.store = store
 
+    def list_flows(self): return [self._public_flow(x) for x in self.store.list_flows()]
+    def get_flow(self, flow_id):
+        item=self.store.get_flow(flow_id)
+        if not item: raise ControlPlaneError("flow not found")
+        return self._public_flow(item)
+    @staticmethod
+    def _public_flow(item):
+        return item
+    def validate_flow(self, flow):
+        from core.flows import validate_flow
+        result=validate_flow(flow)
+        for node in flow.get('nodes',[]):
+            endpoint=node.get('endpoint_id')
+            if node.get('type')=='endpoint_trigger' and (not endpoint or not self.store.get_inbound_endpoint(endpoint) or not self.store.get_inbound_endpoint(endpoint).enabled): result['errors'].append('endpoint trigger connector is missing or disabled'); result['valid']=False
+            if node.get('type')=='webhook_outbound' and (not endpoint or not self.store.get_destination(endpoint) or not self.store.get_destination(endpoint).enabled): result['errors'].append('webhook outbound connector is missing or disabled'); result['valid']=False
+        return result
+    def create_flow(self, flow):
+        result=self.validate_flow(flow)
+        if not result['valid']: raise ControlPlaneError('; '.join(result['errors']))
+        self.store.upsert_flow(flow['id'],flow['name'],flow.get('enabled',True),flow['nodes'],flow.get('edges',[]));return self.get_flow(flow['id'])
+    def update_flow(self, flow_id, changes):
+        current=self.store.get_flow(flow_id)
+        if not current: raise ControlPlaneError('flow not found')
+        return self.create_flow(current|changes|{'id':flow_id})
+    def disable_flow(self, flow_id):
+        if not self.store.set_flow_enabled(flow_id,False): raise ControlPlaneError('flow not found')
+        return self.get_flow(flow_id)
+    def get_flow_run(self, run_id):
+        run=self.store.get_flow_run(run_id)
+        if not run: raise ControlPlaneError('flow run not found')
+        return run
+    def list_flow_runs(self, limit=100): return self.store.list_flow_runs(limit)
+
     @staticmethod
     def _public_inbound(record) -> dict[str, Any]:
         return {

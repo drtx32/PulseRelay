@@ -69,7 +69,7 @@ class DurableRelay:
         self.event_bus = event_bus
         self.aggregator = Aggregator(store)
 
-    def ingest(self, value: EventEnvelope | dict, source_type: str = "webhook") -> tuple[EventEnvelope, bool]:
+    def ingest(self, value: EventEnvelope | dict, source_type: str = "webhook", endpoint_id: str | None = None) -> tuple[EventEnvelope, bool]:
         event = ensure_event(value, source_type=source_type)
         before = self.store.get_event_id_by_dedupe(event.dedupe_key)
         self.store.record_event(source_type, event)
@@ -80,6 +80,12 @@ class DurableRelay:
         self.store.record_audit("event.received", "event", event.id)
         if self.event_bus:
             self.event_bus.publish(event.to_dict() | {"status": "received", "received_at": self.store._now()})
+        if endpoint_id:
+            from core.flows import execute_flow
+            for flow in self.store.list_flows(enabled_only=True):
+                trigger=next((n for n in flow['nodes'] if n['type']=='endpoint_trigger'),None)
+                if trigger and trigger.get('endpoint_id')==endpoint_id:
+                    execute_flow(self.store,flow,event,endpoint_id)
         # Close idle batches before admitting the new event. This prevents a
         # late third message from being appended to a batch whose quiet
         # timeout already expired while the periodic worker was between ticks.
