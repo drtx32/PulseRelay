@@ -625,6 +625,11 @@ def create_app(store: SQLitePhase9Store | None = None) -> FastAPI:
         try: return {"flow": ControlPlaneService(store).create_flow(payload)}
         except ControlPlaneError as exc: raise HTTPException(400, str(exc)) from exc
 
+    @app.post("/v1/flows/validate")
+    async def validate_flow(payload: dict[str, Any], request: Request):
+        _require_scope(request, "routes:read")
+        return {"validation": ControlPlaneService(store).validate_flow(payload)}
+
     @app.get("/v1/flows/{flow_id}")
     async def get_flow(flow_id: str, request: Request):
         _require_scope(request, "routes:read")

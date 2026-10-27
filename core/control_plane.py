@@ -70,7 +70,7 @@ class ControlPlaneService:
         return self._public_flow(item)
     @staticmethod
     def _public_flow(item):
-        return item
+        return redact_mapping(item)
     def validate_flow(self, flow):
         from core.flows import validate_flow
         result=validate_flow(flow)
@@ -93,8 +93,8 @@ class ControlPlaneService:
     def get_flow_run(self, run_id):
         run=self.store.get_flow_run(run_id)
         if not run: raise ControlPlaneError('flow run not found')
-        return run
-    def list_flow_runs(self, limit=100): return self.store.list_flow_runs(limit)
+        return redact_mapping(run)
+    def list_flow_runs(self, limit=100): return [redact_mapping(run) for run in self.store.list_flow_runs(limit)]
 
     @staticmethod
     def _public_inbound(record) -> dict[str, Any]:

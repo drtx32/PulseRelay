@@ -85,7 +85,7 @@ class DurableRelay:
             for flow in self.store.list_flows(enabled_only=True):
                 trigger=next((n for n in flow['nodes'] if n['type']=='endpoint_trigger'),None)
                 if trigger and trigger.get('endpoint_id')==endpoint_id:
-                    execute_flow(self.store,flow,event,endpoint_id)
+                    execute_flow(self.store,flow,event,endpoint_id,self)
         # Close idle batches before admitting the new event. This prevents a
         # late third message from being appended to a batch whose quiet
         # timeout already expired while the periodic worker was between ticks.
